@@ -5,7 +5,8 @@
   <!-- import main macro -->
   <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
 
-  <xacro:include filename="$(find ur_simulation_gz)/urdf/ur_gz.ros2_control.xacro" />
+  <!-- <xacro:include filename="$(find ur_simulation_gz)/urdf/ur_gz.ros2_control.xacro" /> -->
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur_joint_control.xacro" />
 
   <!-- possible 'ur_type' values: ur3, ur5, ur10, ur3e, ur5e, ur7e, ur10e, ur12e, ur16e, ur8long, ur15, ur20, ur30 -->
   <!-- the default value should raise an error in case this was called without defining the type -->
@@ -37,7 +38,7 @@
   <link name="world" />
 
   <link name="ground_plane">
-    <visual>
+    <!-- <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <box size="5 5 0"/>
@@ -45,7 +46,7 @@
       <material name="ground_white">
         <color rgba="1 1 1 0.5"/>
       </material>
-    </visual>
+    </visual> -->
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -64,7 +65,7 @@
   <xacro:ur_robot
     name="$(arg name)"
     tf_prefix="$(arg tf_prefix)"
-    parent="world"
+    parent="ground_plane"
     joint_limits_parameters_file="$(arg joint_limit_params)"
     kinematics_parameters_file="$(arg kinematics_params)"
     physical_parameters_file="$(arg physical_params)"
@@ -86,12 +87,46 @@
         <namespace>$(arg ros_namespace)</namespace>
       </ros>
     </plugin>
+    <plugin filename="gz-sim-forcetorque-system"
+            name="gz::sim::systems::ForceTorque">
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="$(arg tf_prefix)wrist_3_joint">
+    <sensor name="force_torque_sensor" type="force_torque">
+      <always_on>true</always_on>
+      <update_rate>50</update_rate>
+      <visualize>true</visualize>
+      <topic>$(arg tf_prefix)wrist_3_joint/force_torque</topic>
+      <force_torque>
+        <frame>sensor</frame>
+        <measure_direction>parent_to_child</measure_direction>
+      </force_torque>
+    </sensor>
   </gazebo>
 
   <!-- ros2 control instance -->
-  <xacro:ur_ros2_control
-    name="$(arg name)"
-    tf_prefix="$(arg tf_prefix)"
-    transmission_hw_interface="$(arg transmission_hw_interface)"
-  />
+  <ros2_control name="GazeboSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <sensor name="force_torque_sensor" type="force_torque">
+      <state_interface name="force.x"/>
+      <state_interface name="force.y"/>
+      <state_interface name="force.z"/>
+      <state_interface name="torque.x"/>
+      <state_interface name="torque.y"/>
+      <state_interface name="torque.z"/>
+    </sensor>
+
+    <xacro:ur_joint_control_description
+      tf_prefix="$(arg tf_prefix)"
+      initial_positions="${dict(shoulder_pan_joint=0.0,shoulder_lift_joint=-1.57,elbow_joint=0.0,wrist_1_joint=-1.57,wrist_2_joint=0.0,wrist_3_joint=0.0)}"
+    />
+  </ros2_control>
+
+
+
+
 </robot>

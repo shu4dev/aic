@@ -20,7 +20,6 @@ from launch.substitutions import (
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from launch_ros.substitutions import FindPackageShare
-from nav2_common.launch import ReplaceString, RewrittenYaml
 
 def launch_setup(context, *args, **kwargs):
     # UR arguments
@@ -131,11 +130,18 @@ def launch_setup(context, *args, **kwargs):
         arguments=[initial_joint_controller, "-c", "/controller_manager"],
         condition=IfCondition(activate_joint_controller),
     )
+
     initial_joint_controller_spawner_stopped = Node(
         package="controller_manager",
         executable="spawner",
         arguments=[initial_joint_controller, "-c", "/controller_manager", "--stopped"],
         condition=UnlessCondition(activate_joint_controller),
+    )
+
+    fts_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["fts_broadcaster", "--controller-manager", "/controller_manager"],
     )
 
     # GZ nodes
@@ -166,13 +172,14 @@ def launch_setup(context, *args, **kwargs):
         }.items(),
     )
 
-    # Make the /clock topic available in ROS
+    # Bridge multiple gz topics to ROS such as /clock, /camera and force-torque sensing
     gz_sim_bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
         arguments=[
             "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
             "/camera@sensor_msgs/msg/Image@gz.msgs.Image",
+            "wrist_3_joint/force_torque@geometry_msgs/msg/WrenchStamped@gz.msgs.Wrench",
         ],
         output="screen",
     )
@@ -183,6 +190,7 @@ def launch_setup(context, *args, **kwargs):
         delay_rviz_after_joint_state_broadcaster_spawner,
         initial_joint_controller_spawner_stopped,
         initial_joint_controller_spawner_started,
+        fts_broadcaster_spawner,
         gz_spawn_entity,
         gz_launch_description,
         gz_sim_bridge,
@@ -312,7 +320,7 @@ def generate_launch_description():
         DeclareLaunchArgument("y", default_value="0.0", description="Robot spawn Y position")
     )
     declared_arguments.append(
-        DeclareLaunchArgument("z", default_value="2.0", description="Robot spawn Z position")
+        DeclareLaunchArgument("z", default_value="1.0", description="Robot spawn Z position")
     )
     declared_arguments.append(
         DeclareLaunchArgument("roll", default_value="0.0", description="Robot spawn roll orientation (radians)")
