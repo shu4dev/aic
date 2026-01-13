@@ -199,7 +199,7 @@
   </xacro:if>
 
   <!-- NIC Card Mount 0 (left-most) -->
-  <xacro:if value="$(arg nic_card_mount_0_present)">    
+  <xacro:if value="$(arg nic_card_mount_0_present)">
     <xacro:nic_card_mount prefix="nic_card_mount_0" pose="${-0.081418 + $(arg nic_card_mount_0_translation)} -0.1745 0.01 $(arg nic_card_mount_0_roll) $(arg nic_card_mount_0_pitch) $(arg nic_card_mount_0_yaw)"/>
     <gazebo>
       <joint name="nic_card_mount_0_joint" type="fixed">
@@ -255,5 +255,18 @@
 
   <gazebo>
     <static>true</static>
+    <plugin filename="libgz-sim-pose-publisher-system.so"
+      name="gz::sim::systems::PosePublisher">
+      <publish_link_pose>true</publish_link_pose>
+      <publish_sensor_pose>false</publish_sensor_pose>
+      <publish_collision_pose>false</publish_collision_pose>
+      <publish_visual_pose>false</publish_visual_pose>
+      <publish_nested_model_pose>true</publish_nested_model_pose>
+      <publish_model_pose>true</publish_model_pose>
+      <use_pose_vector_msg>true</use_pose_vector_msg>
+      <static_publisher>true</static_publisher>
+      <update_frequency>0</update_frequency>
+      <static_update_frequency>1</static_update_frequency>
+    </plugin>
   </gazebo>
 </robot>

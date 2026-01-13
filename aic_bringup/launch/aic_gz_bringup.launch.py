@@ -78,6 +78,7 @@ def launch_setup(context, *args, **kwargs):
     cable_pitch = LaunchConfiguration("cable_pitch")
     cable_yaw = LaunchConfiguration("cable_yaw")
     attach_cable_to_gripper = LaunchConfiguration("attach_cable_to_gripper")
+    ground_truth = LaunchConfiguration("ground_truth")
 
     robot_description_content = Command(
         [
@@ -301,6 +302,46 @@ def launch_setup(context, *args, **kwargs):
         use_composition="True",
     )
 
+    ground_truth_tf_relay = Node(
+        package="topic_tools",
+        executable="relay",
+        name="tf_relay",
+        output="screen",
+        parameters=[
+            {"input_topic": "/scoring/tf"},
+            {"output_topic": "/tf"},
+            {"lazy": True},
+        ],
+        condition=IfCondition(ground_truth),
+    )
+
+    ground_truth_tf_static_relay = Node(
+        package="topic_tools",
+        executable="relay",
+        name="tf_static_relay",
+        output="screen",
+        parameters=[
+            {"input_topic": "/scoring/tf_static"},
+            {"output_topic": "/tf_static"},
+            {"lazy": True},
+        ],
+        condition=IfCondition(ground_truth),
+    )
+
+    ground_truth_static_tf_publisher = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="ground_truth_static_tf_publisher",
+        output="screen",
+        arguments=[
+            "--frame-id",
+            "world",
+            "--child-frame-id",
+            "aic_world",
+        ],
+        condition=IfCondition(ground_truth),
+    )
+
     nodes_to_start = [
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
@@ -315,6 +356,9 @@ def launch_setup(context, *args, **kwargs):
         gz_spawn_entity,
         spawn_task_board_launch,
         spawn_cable_launch,
+        ground_truth_tf_relay,
+        ground_truth_tf_static_relay,
+        ground_truth_static_tf_publisher,
     ]
 
     return nodes_to_start
@@ -610,6 +654,13 @@ def generate_launch_description():
             "cable_yaw",
             default_value="2.6928",
             description="Cable spawn yaw orientation (radians)",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "ground_truth",
+            default_value="false",
+            description="Whether to include ground truth poses in TF topics",
         )
     )
 
