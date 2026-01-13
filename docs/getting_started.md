@@ -27,6 +27,7 @@ This is your development workspace. It is designed to package the `aic_model` pa
 ### Requirements
 - [Ubuntu 24.04](https://releases.ubuntu.com/noble/)
 - [ROS 2 Kilted Kaiju](https://docs.ros.org/en/kilted/Installation/Ubuntu-Install-Debs.html)
+- [pixi](https://pixi.prefix.dev/latest/installation/)
 
 ### Install
 
@@ -48,9 +49,9 @@ vcs import . < aic/aic.repos --recursive
 sudo apt -y install $(sort -u $(find . -iname 'packages-'`lsb_release -cs`'.apt' -o -iname 'packages.apt' | grep -v '/\.git/') | sed '/gz\|sdf/d' | tr '\n' ' ')
 cd ~/ws_aic
 # Install ROS dependencies using rosdep.
-rosdep install --from-paths src --ignore-src --rosdistro kilted -yr --skip-keys "gz-cmake3 DART libogre-dev libogre-next-2.3-dev"
+rosdep install --from-paths src --ignore-src --rosdistro kilted -yr --skip-keys "gz-cmake3 DART libogre-dev libogre-next-2.3-dev rosetta"
 source /opt/ros/kilted/setup.bash
-GZ_BUILD_FROM_SOURCE=1 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --merge-install --symlink-install
+GZ_BUILD_FROM_SOURCE=1 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --merge-install --symlink-install --packages-ignore lerobot_robot_aic aic_lerobot_tools
 ```
 
 ### Launch
@@ -81,6 +82,9 @@ ros2 launch aic_bringup aic_gz_bringup.launch.py
 > [!NOTE]
 > To spawn a cable and attach it to the gripper, pass `spawn_cable:=True` and `attach_cable_to_gripper:=True` to the launch command.
 
+### LeRobot Support
+
+A LeRobot interface is available to train a policy using [LeRobot](https://huggingface.co/lerobot). See [lerobot_robot_aic](../aic_utils/lerobot_robot_aic/README.md).
 
 #### Debugging
 
