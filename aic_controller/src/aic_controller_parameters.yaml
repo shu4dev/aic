@@ -40,6 +40,12 @@ aic_controller:
     description: "Sets the controller used, which can be either 'impedance' or 'admittance'"
   }
 
+  target_mode: {
+    type: string,
+    default_value: "joint",
+    description: "Sets the target mode, which controls the type of target accepted. Values are 'cartesian' or 'joint'"
+  }
+
   admittance_controller_namespace: {
     type: string,
     default_value: "admittance_controller",
@@ -196,6 +202,41 @@ aic_controller:
         validation: {
           fixed_size<>: 6
         }
+      }
+
+  # Joint impedance controller parameters
+  joint_impedance:
+    interpolator:
+      min_value: {
+        type: double_array,
+        description: "Minimum allowed value for feedforward torque",
+        validation: {
+          fixed_size<>: 6
+        }
+      }
+      max_value: {
+        type: double_array,
+        description: "Maximum allowed value for feedforward torque",
+        validation: {
+          fixed_size<>: 6
+        }
+      }
+      max_step_size: {
+        type: double_array,
+        description: "Maximum step size used to interpolate the feedforward torque",
+        validation: {
+          fixed_size<>: 6
+        }
+      }
+
+    default_values:
+      control_stiffness: {
+        type: double_array,
+        description: "Default starting values for control stiffness vector",
+      }
+      control_damping: {
+        type: double_array,
+        description: "Default starting values for control damping vector",
       }
 
   # general settings
