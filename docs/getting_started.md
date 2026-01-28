@@ -167,6 +167,7 @@ sudo apt -y install $(sort -u $(find . -iname 'packages-'`lsb_release -cs`'.apt'
 
 # Install ROS dependencies
 cd ~/ws_aic
+sudo rosdep init # if running rosdep for the first time.
 rosdep install --from-paths src --ignore-src --rosdistro kilted -yr --skip-keys "gz-cmake3 DART libogre-dev libogre-next-2.3-dev rosetta"
 
 # Build the workspace
