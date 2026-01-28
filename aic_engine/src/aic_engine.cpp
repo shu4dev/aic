@@ -290,8 +290,6 @@ int Score::calculate_total_score() const {
 //==============================================================================
 Engine::Engine(const rclcpp::NodeOptions& options)
     : node_(std::make_shared<rclcpp::Node>("aic_engine", options)),
-      wrench_sub_(nullptr),
-      joint_state_sub_(nullptr),
       insert_cable_action_client_(nullptr),
       spawn_entity_client_(nullptr),
       is_first_trial_(true),
@@ -429,7 +427,6 @@ EngineState Engine::initialize() {
   RCLCPP_INFO(node_->get_logger(), "Successfully parsed %zu trial(s)",
               trials_.size());
 
-  // Parse trials from config
   if (!config_["scoring"]) {
     RCLCPP_ERROR(node_->get_logger(), "Config missing required key: 'scoring'");
     engine_state_ = EngineState::Error;
@@ -438,17 +435,6 @@ EngineState Engine::initialize() {
 
   // Create ROS endpoints.
   const rclcpp::QoS reliable_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
-  wrench_sub_ = node_->create_subscription<WrenchStampedMsg>(
-      "/axia80_m20/wrench", reliable_qos,
-      [](WrenchStampedMsg::ConstSharedPtr msg) {
-        (void)msg;
-        // TODO(Yadunund): Pass to scoring.
-      });
-  joint_state_sub_ = node_->create_subscription<JointStateMsg>(
-      "/joint_states", reliable_qos, [](JointStateMsg::ConstSharedPtr msg) {
-        (void)msg;
-        // TODO(Yadunund): Pass to scoring.
-      });
 
   // Create subscriptions that ignore local publications as aic_engine will
   // also publish these messages to home the robot.
@@ -598,10 +584,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
   if (trial.state == TrialState::TasksExecuting) {
     if (this->tasks_completed_successfully(trial)) {
       trial.state = TrialState::AllTasksCompleted;
-      if (!stop_recording_scores()) {
-        reset_after_trial(trial);
-        return score;
-      }
+      score_trial();
     }
   } else {
     RCLCPP_ERROR(node_->get_logger(), "Tasks cannot be started successfully.");
@@ -611,7 +594,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
 
   if (trial.state != TrialState::AllTasksCompleted) {
     RCLCPP_ERROR(node_->get_logger(), "Tasks were not completed successfully.");
-    stop_recording_scores();
+    score_trial();
     reset_after_trial(trial);
     return score;
   }
@@ -881,18 +864,11 @@ bool Engine::check_endpoints() {
 
   // Check topics
   // TODO(Yadunund): Consider checking for messages received on topics.
-  // unavailable is guaranteed to be empty here
-  unavailable.insert({this->wrench_sub_->get_topic_name(),
-                      this->joint_state_sub_->get_topic_name()});
+  unavailable = this->scoring_tier2_->GetMissingRequiredTopics();
   start_time = this->node_->now();
   while (!unavailable.empty() && !(this->node_->now() - start_time > timeout)) {
-    if (this->wrench_sub_->get_publisher_count() > 0) {
-      unavailable.erase(this->wrench_sub_->get_topic_name());
-    }
-    if (this->joint_state_sub_->get_publisher_count() > 0) {
-      unavailable.erase(this->joint_state_sub_->get_topic_name());
-    }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    unavailable = this->scoring_tier2_->GetMissingRequiredTopics();
   }
   if (!unavailable.empty()) {
     RCLCPP_ERROR(node_->get_logger(), "Missing required topics: %s",
@@ -1543,14 +1519,16 @@ bool Engine::spawn_entity(Trial& trial, std::string entity_name,
 }
 
 //==============================================================================
-bool Engine::stop_recording_scores() {
+std::optional<int> Engine::score_trial() {
   if (!scoring_tier2_->StopRecording()) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to stop recording.");
-    return false;
+    return std::nullopt;
   }
+  auto score = scoring_tier2_->ComputeScore();
 
-  RCLCPP_INFO(node_->get_logger(), "Stopped recording.");
-  return true;
+  RCLCPP_INFO(node_->get_logger(), "Finished scoring trial, total score is: %u",
+              score);
+  return score;
 }
 
 //==============================================================================

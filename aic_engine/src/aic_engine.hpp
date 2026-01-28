@@ -301,9 +301,10 @@ class Engine {
   /// @return True if shutdown succeeded, false otherwise.
   bool shutdown_model_node();
 
-  /// @brief Stop the bag recording.
-  /// @return True if stopping recording succeeded, false otherwise.
-  bool stop_recording_scores();
+  /// @brief Stop the bag recording and score the current trial
+  /// @return An optional with the trial score or nullopt if scoring failed.
+  // TODO(luca) a proper score type defined in scoring class
+  std::optional<int> score_trial();
 
   /// @brief Scores the current run, writing its result to a YAML file.
   /// \param[in] The score to serialize and write.
@@ -322,8 +323,6 @@ class Engine {
   // Internal ROS 2 node.
   rclcpp::Node::SharedPtr node_;
   // Subscriptions.
-  rclcpp::Subscription<WrenchStampedMsg>::SharedPtr wrench_sub_;
-  rclcpp::Subscription<JointStateMsg>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<JointMotionUpdateMsg>::SharedPtr
       joint_motion_update_sub_;
   rclcpp::Subscription<MotionUpdateMsg>::SharedPtr motion_update_sub_;
