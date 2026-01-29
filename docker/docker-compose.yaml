@@ -24,3 +24,4 @@ services:
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
 networks:
   default:
+    internal: true

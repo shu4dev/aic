@@ -424,10 +424,12 @@
         flows: ["ingress", "egress"],
         // `@adv/**` are for transient local
         key_exprs: [
+          "*/aic_controller/controller_state/*/*",
+          "*/aic_controller/controller_state/*/*/@adv/**",
           "*/joint_states/*/*",
           "*/joint_states/*/*/@adv/**",
-          "*/fts_broadcaster/wrench/*/*",
-          "*/fts_broadcaster/wrench/*/*/@adv/**",
+          "*/gripper_action_controller/gripper_cmd/*/*",
+          "*/gripper_action_controller/gripper_cmd/*/*/@adv/**",
           "*/left_camera/camera_info/*/*",
           "*/left_camera/camera_info/*/*/@adv/**",
           "*/left_camera/image/*/*",
