@@ -406,11 +406,11 @@
     default_permission: "deny",
     rules: [
       {
-        id: "liveliness_tokens",
-        permission: "allow",
-        flows: ["ingress", "egress"],
-        key_exprs: ["@ros2_lv/**"],
-        messages: [
+        "id": "liveliness_tokens",
+        "permission": "allow",
+        "flows": ["ingress", "egress"],
+        "key_exprs": ["@ros2_lv/**"],
+        "messages": [
           "liveliness_token",
           "liveliness_query",
           "declare_liveliness_subscriber",
