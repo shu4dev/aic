@@ -42,6 +42,8 @@ If you want allow the evaluator to publish a topic to the participant, put it in
 
 If you want to allow the evaluator to subscribe to a publication from the participant, put it in `outgoing_publications_all`, `incoming_subscriptions_all`, `incoming_publications_all`, `outgoing_subscriptions_all`.
 
+For services and actions, use `outgoing_publications_all`, `incoming_subscriptions_all`, `incoming_publications_all`, `outgoing_subscriptions_all` as they are bidirectional.
+
 How it works is that the router essentially acts as a proxy for the evaluator. When you want to allow the evaluator to publish a topic, the router will *subscribe* to the topic, and *publish* it to the participant. 
 
 So it will:
