@@ -604,6 +604,7 @@
     policies: [
       {
         rules: [
+          "liveliness_tokens",
           "outgoing_publications_all",
           "incoming_subscriptions_all",
           "incoming_publications_all",
@@ -613,7 +614,6 @@
       },
       {
         rules: [
-          "liveliness_tokens",
           "outgoing_subscriptions_eval",
           "incoming_publications_eval",
         ],
