@@ -73,7 +73,10 @@ void ScoringTier2::SetGripperFrame(const std::string &_gripperFrame) {
 }
 
 //////////////////////////////////////////////////
-bool ScoringTier2::StartRecording(const std::string &_filename) {
+bool ScoringTier2::StartRecording(const std::string &_filename,
+                                  const std::vector<Connection> &_connections) {
+  this->Reset();
+  this->ResetConnections(_connections);
   std::lock_guard<std::mutex> lock(this->mutex);
   if (this->state != State::Idle) {
     RCLCPP_ERROR(this->node->get_logger(), "Scoring system is busy.");
@@ -227,8 +230,23 @@ std::pair<Tier2Score, Tier3Score> ScoringTier2::ComputeScore() {
   this->state = State::Idle;
   tier2_score.add_category_score("trajectory jerk",
                                  this->GetTrajectoryJerkScore());
+  tier2_score.add_category_score("insertion force",
+                                 this->GetInsertionForceScore());
   tier3_score = this->GetDistanceScore();
   return {tier2_score, tier3_score};
+}
+
+//////////////////////////////////////////////////
+void ScoringTier2::Reset() {
+  this->connections.clear();
+  this->bagUri.clear();
+  this->tf2_buffer.clear();
+  this->state = State::Idle;
+  this->timestamps.clear();
+  this->wrenches.clear();
+  this->task_start_time.reset();
+  this->task_end_time.reset();
+  this->bagWriter.close();
 }
 
 //////////////////////////////////////////////////
@@ -332,7 +350,10 @@ void ScoringTier2::TfStaticCallback(const TFMsg &_msg) {
 void ScoringTier2::ContactsCallback(const ContactsMsg &_msg) { (void)_msg; }
 
 //////////////////////////////////////////////////
-void ScoringTier2::WrenchCallback(const WrenchMsg &_msg) { (void)_msg; }
+void ScoringTier2::WrenchCallback(const WrenchMsg &_msg) {
+  const auto time = rclcpp::Time(_msg.header.stamp);
+  this->wrenches.push_back({time.seconds(), _msg.wrench.force});
+}
 
 //////////////////////////////////////////////////
 void ScoringTier2::MotionUpdateCallback(const MotionUpdateMsg &_msg) {
@@ -592,6 +613,52 @@ std::optional<ScoringTier2::TransformStampedMsg> ScoringTier2::EndEffectorPose(
     return std::nullopt;
   }
   return this->GetTransform(t, "aic_world", this->gripperFrame);
+}
+
+//////////////////////////////////////////////////
+Tier2Score::CategoryScore ScoringTier2::GetInsertionForceScore() const {
+  using CategoryScore = Tier2Score::CategoryScore;
+  // Apply a fixed penalty if excessive force is detected for more than a
+  // certain time
+  // Note that the resting reading of the sensor seems to be about 20N
+  const double kForceThreshold = 25.0;
+  const double kDurationThreshold = 1.0;
+  const double kPenalty = -10.0;
+
+  double time_above_threshold = 0.0;
+  // Start from 1 for easier dt calculation
+  for (std::size_t i = 1; i < this->wrenches.size(); ++i) {
+    const auto &f = this->wrenches[i].second;
+    const double force_mag = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
+    if (force_mag > kForceThreshold) {
+      time_above_threshold +=
+          this->wrenches[i].first - this->wrenches[i - 1].first;
+    }
+  }
+
+  std::string msg;
+  if (time_above_threshold == 0.0) {
+    return CategoryScore(0, "No excessive force detected");
+  }
+
+  double score = 0.0;
+  std::stringstream sstream;
+  sstream.setf(std::ios::fixed);
+  sstream.precision(2);
+  sstream << "Insertion force above " << kForceThreshold
+          << " N, detected for a time of " << time_above_threshold
+          << " seconds.";
+
+  if (time_above_threshold > kDurationThreshold) {
+    score = kPenalty;
+    sstream << " This is above the threshold of " << kDurationThreshold
+            << " seconds. Penalty applied.";
+  } else {
+    sstream << " This is below the threshold of " << kDurationThreshold
+            << " seconds. Penalty not applied.";
+  }
+
+  return CategoryScore(score, sstream.str());
 }
 
 //////////////////////////////////////////////////

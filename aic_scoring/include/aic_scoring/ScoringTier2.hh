@@ -132,7 +132,7 @@ namespace aic_scoring
 
     /// \brief Reset connections.
     /// \param[in] _connections New connections.
-    public: void ResetConnections(const std::vector<Connection> &_connections);
+    private: void ResetConnections(const std::vector<Connection> &_connections);
 
     /// \brief Set the gripper frame name.
     /// \param[in] _gripperFrame Gripper frame name.
@@ -141,7 +141,9 @@ namespace aic_scoring
     /// \brief Start recording all scoring topics.
     /// \return True if the bag was opened correctly and it's ready to record.
     /// \param[in] _filename The path to the bag.
-    public: bool StartRecording(const std::string &_filename);
+    /// \param[in] _connections Connections to monitor.
+    public: bool StartRecording(const std::string &_filename,
+                const std::vector<Connection> &_connections);
 
     /// \brief Stop recording all scoring topics.
     /// \return True if the bag was closed correctly.
@@ -150,6 +152,9 @@ namespace aic_scoring
     /// \brief Compute the score the bag that we just recorded.
     /// \return A pair with the Tier2 and Tier3 scores.
     public: std::pair<Tier2Score, Tier3Score> ComputeScore();
+
+    /// \brief Resets the internal data structures for a new scoring session
+    public: void Reset();
 
     /// \brief Get the topics required that are currently not being published.
     /// \return An unordered_set with the missing required topic names.
@@ -226,6 +231,10 @@ namespace aic_scoring
     /// \return Distance between plug and port at the end of the task. nullopt if failed
     private: std::optional<double> GetPlugPortDistance(tf2::TimePoint t) const;
 
+    /// \brief Calculates the penalty (if any) for excessive insertion force.
+    /// \return Scoring for the insertion force category
+    private: Tier2Score::CategoryScore GetInsertionForceScore() const;
+
     /// \brief Calculates the tier 3 score based on the distance between plug and port.
     /// \return Scoring for the distance category
     private: Tier3Score GetDistanceScore() const;
@@ -265,6 +274,10 @@ namespace aic_scoring
 
     /// \brief Timestamps of received tfs to be used for distance calculation
     private: std::set<tf2::TimePoint> timestamps;
+
+    /// \brief Readings from the force torque sensor, pair is timestamp
+    /// and force
+    private: std::vector<std::pair<double, Vector3Msg>> wrenches;
 
     /// \brief Mutex to protect the access to the bag.
     private: std::mutex mutex;
