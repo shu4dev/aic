@@ -65,6 +65,7 @@ ros2 run rmw_zenoh_cpp rmw_zenohd
 Start evaluator
 
 ```bash
+. src/aic/docker/acl/zenoh_config_eval.sh
 ros2 launch aic_bringup aic_gz_bringup.launch.py launch_rviz:=false gazebo_gui:=false ground_truth:=false start_aic_engine:=true shutdown_on_aic_engine_exit:=true
 ```
 
