@@ -18,7 +18,40 @@ RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,targ
     cd /ws_aic/src/aic && pixi install --frozen
 
 WORKDIR /ws_aic/src/aic
-ENTRYPOINT [ \
-    "pixi", "run", "--as-is", \
-    "ros2", "run", "aic_model", "aic_model" \
-]
+COPY --chmod=755 <<"EOF" /entrypoint.sh
+#!/bin/bash
+set -e
+
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+
+if [[ -z "$AIC_MODEL_ROUTER_ADDR" ]]; then
+  echo "AIC_MODEL_ROUTER_ADDR must be provided"
+  exit 1
+fi
+
+should_disable_acl() {
+  [[ "$AIC_DISABLE_ACL" == "true" || "$AIC_DISABLE_ACL" == "1" ]]
+}
+
+# prepare the credentials file
+if ! should_disable_acl; then
+  if [[ ! (-n "$AIC_MODEL_PASSWD" && -n "$AIC_MODEL_ROUTER_PASSWD") ]]; then
+    echo "AIC_MODEL_PASSWD, AIC_MODEL_ROUTER_PASSWD must be provided"
+    exit 1
+  fi
+  echo "model:$AIC_MODEL_PASSWD" >> /credentials.txt
+  echo "model-router:$AIC_MODEL_ROUTER_PASSWD" >> /credentials.txt
+fi
+
+# start the evaluator
+ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/'"$AIC_MODEL_ROUTER_ADDR"'"]'
+if ! should_disable_acl; then
+  ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="model"'
+  ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"$AIC_MODEL_PASSWD"'"'
+  ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/dictionary_file="/credentials.txt"'
+fi
+export ZENOH_CONFIG_OVERRIDE
+exec pixi run --as-is ros2 run aic_model aic_model "$@"
+EOF
+
+ENTRYPOINT ["/entrypoint.sh"]

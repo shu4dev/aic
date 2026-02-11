@@ -5,35 +5,16 @@ services:
     build:
       dockerfile: docker/aic_eval/Dockerfile
       context: ..
-    entrypoint: ["/entrypoint_eval.sh"]
+    entrypoint: ["/entrypoint.sh"]
     command: gazebo_gui:=false launch_rviz:=false ground_truth:=false start_aic_engine:=true shutdown_on_aic_engine_exit:=true
     gpus: all
     networks:
       - default
-    volumes:
-      - type: bind
-        source: acl
-        target: /acl
-        read_only: true
     environment:
-      ZENOH_ROUTER_CONFIG_URI: /acl/zenoh_router_config.json5
-      ZENOH_CONFIG_OVERRIDE: connect/endpoints=["tcp/eval-router:7448"];transport/auth/usrpwd/user="eval";transport/auth/usrpwd/password="CHANGE_IN_PROD";transport/auth/usrpwd/dictionary_file="/acl/credentials.txt"
-  eval-router:
-    image: ghcr.io/intrinsic-dev/aic/rmw_zenohd
-    build:
-      dockerfile: docker/rmw_zenohd/Dockerfile
-      context: ..
-    command: ros2 run rmw_zenoh_cpp rmw_zenohd
-    networks:
-      - default
-    volumes:
-      - type: bind
-        source: acl
-        target: /acl
-        read_only: true
-    environment:
-      ZENOH_ROUTER_CONFIG_URI: /acl/zenoh_router_config.json5
-      ZENOH_CONFIG_OVERRIDE: transport/auth/usrpwd/user="eval-router";transport/auth/usrpwd/password="CHANGE_IN_PROD";transport/auth/usrpwd/dictionary_file="/acl/credentials.txt"
+      AIC_EVAL_PASSWD: CHANGE_IN_PROD
+      AIC_EVAL_ROUTER_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_ROUTER_PASSWD: CHANGE_IN_PROD
   model:
     image: localhost/aic/aic_model
     build:
@@ -43,30 +24,12 @@ services:
     gpus: all
     networks:
       - default
-    volumes:
-      - type: bind
-        source: acl
-        target: /acl
-        read_only: true
     environment:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
-      ZENOH_CONFIG_OVERRIDE: connect/endpoints=["tcp/model-router:7447"];transport/auth/usrpwd/user="model";transport/auth/usrpwd/password="CHANGE_IN_PROD";transport/auth/usrpwd/dictionary_file="/acl/model-credentials.txt"
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
-  model-router:
-    image: ghcr.io/intrinsic-dev/aic/rmw_zenohd
-    build:
-      dockerfile: docker/rmw_zenohd/Dockerfile
-      context: ..
-    command: ros2 run rmw_zenoh_cpp rmw_zenohd
-    networks:
-      - default
-    volumes:
-      - type: bind
-        source: acl
-        target: /acl
-        read_only: true
-    environment:
-      ZENOH_CONFIG_OVERRIDE: connect/endpoints=["tcp/eval-router:7448"];routing/router/peers_failover_brokering=true;transport/auth/usrpwd/user="model-router";transport/auth/usrpwd/password="CHANGE_IN_PROD";transport/auth/usrpwd/dictionary_file="/acl/credentials.txt"
+      AIC_MODEL_ROUTER_ADDR: model-router:7447
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_ROUTER_PASSWD: CHANGE_IN_PROD
 networks:
   default:
     internal: true
