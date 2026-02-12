@@ -76,20 +76,18 @@ Also see [Alternative Installation Methods](https://pixi.prefix.dev/latest/insta
    distrobox enter -r aic_eval
 
    # Inside the container, start the environment
-   /entrypoint.sh
+   AIC_DISABLE_ACL=1 /entrypoint.sh
    ```
 
-   <!-- TODO: Update instruction to disable ACL after https://github.com/intrinsic-dev/aic/pull/190 or https://github.com/intrinsic-dev/aic/pull/171 is merged. -->
+> [!Note]
+> You may need to [login to ghcr.io](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
-   > [!Note]
-   > You may need to [login to ghcr.io](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
+<!-- TODO: Shouldn't need to login after we make it public -->
 
-   <!-- TODO: Shouldn't need to login after we make it public -->
+> [!Tip]
+> Prefer building locally? See [Building Locally on Ubuntu 24.04](#building-locally-on-ubuntu-2404) for native installation instructions.
 
-   > [!Tip]
-   > Prefer building locally? See [Building Locally on Ubuntu 24.04](#building-locally-on-ubuntu-2404) for native installation instructions.
-
-2. **Set up pixi workspace:**
+1. **Set up pixi workspace:**
    ```bash
    # Clone this repo
    mkdir -p ~/ws_aic/src
@@ -101,7 +99,7 @@ Also see [Alternative Installation Methods](https://pixi.prefix.dev/latest/insta
    pixi install
    ```
 
-3. **Run an example policy:**
+2. **Run an example policy:**
    ```bash
    pixi run ros2 run aic_model aic_model --ros-args -p policy:=aic_example_policies.ros.WaveArm
    ```
