@@ -29,17 +29,22 @@ This will generate a bunch of zenoh config files, one for each node in the SROS2
 
 The generated config contains settings to allow outgoing publications and incoming subscriptions. But because we are puting the acl on the router with peer brokering. We actually need incoming publications and outgoing subscriptions as well.
 
-Add the topics that you want to allow to one or more of the following
+To help build the zenoh config, use the `generate_acl.py` script. Add the topics, services and actions to be allowed in one of
 
-* allow_all
-* outgoing_publications
-* incoming_subscriptions
-* incoming_publications
-* outgoing_subscriptions
+* allow_topics_eval_to_model
+* allow_topics_bidi
+* allow_services_bidi
+* allow_actions_bidi
 
-If you want a topic to _only_ be able to be published by the evaluator to the participant, put it in `outgoing_publications`, `incoming_subscriptions`, `incoming_publications` and `outgoing_subscriptions`.
+then run the script
 
-If you want a topic to be able to be published by anyone, put it in `allow_all`. This includes services and actions which are bidirectional.
+```bash
+pixi run python docker/acl/generate_acl.py
+```
+
+The difference between `allow_topics_eval_to_model` and `allow_topics_bidi` is that `allow_topics_eval_to_model` only allows the participant to subscribe to the topic. `allow_topics_bidi` allows them to publish a message on that topic to the evaluator as well.
+
+### Zenoh Internals
 
 How it works is that the router essentially acts as a proxy for the evaluator. When you want to allow the evaluator to publish a topic, the router will *subscribe* to the topic, and *publish* it to the participant. 
 
