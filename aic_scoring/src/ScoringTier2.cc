@@ -252,18 +252,32 @@ std::pair<Tier2Score, Tier3Score> ScoringTier2::ComputeScore() {
   msg.transforms.push_back(transform_stamped);
   this->TfStaticCallback(msg);
 
-  // Second pass: Compute jerk for each stored timestamp.
+  // Second pass: Compute jerk and path length for each stored timestamp.
   // Now the TF buffer has the complete transform tree.
   for (const auto &t : this->timestamps) {
     auto pose = this->EndEffectorPose(t);
     if (pose.has_value()) {
       this->JerkCallback(*pose);
+      this->EfficiencyCallback(*pose);
     }
   }
 
   this->state = State::Idle;
   tier2_score.add_category_score("trajectory jerk",
                                  this->GetTrajectoryJerkScore());
+  // Compute initial plug-port distance for trajectory efficiency scoring.
+  // The robot must travel at least this distance, so it becomes the minimum
+  // path length for a perfect score.
+  double minPathLength = 0.0;
+  if (!this->timestamps.empty()) {
+    const auto initDist = this->GetPlugPortDistance(*this->timestamps.begin());
+    if (initDist.has_value()) {
+      minPathLength = initDist.value();
+    }
+  }
+  tier2_score.add_category_score(
+      "trajectory efficiency",
+      this->GetTrajectoryEfficiencyScore(minPathLength));
   tier2_score.add_category_score("insertion force",
                                  this->GetInsertionForceScore());
   tier2_score.add_category_score("contacts", this->GetContactsScore());
@@ -291,6 +305,9 @@ void ScoringTier2::Reset(const std::chrono::seconds &_buffer_size) {
   this->avgLinearJerk = Vector3Msg();
   this->accumLinearJerk = Vector3Msg();
   this->totalJerkTime = 0.0;
+  // Efficiency computation variables
+  this->totalPathLength = 0.0;
+  this->prevPose.reset();
 }
 
 //////////////////////////////////////////////////
@@ -521,6 +538,42 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryJerkScore() const {
       kMaxJerkScore, kMinJerkScore, kMaxJerkValue, kMinJerkValue, jerk);
 
   return CategoryScore(score, sstream.str());
+}
+
+//////////////////////////////////////////////////
+void ScoringTier2::EfficiencyCallback(const TransformStampedMsg &_tf) {
+  if (this->prevPose.has_value()) {
+    double dx =
+        _tf.transform.translation.x - this->prevPose->transform.translation.x;
+    double dy =
+        _tf.transform.translation.y - this->prevPose->transform.translation.y;
+    double dz =
+        _tf.transform.translation.z - this->prevPose->transform.translation.z;
+    this->totalPathLength += std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  this->prevPose = _tf;
+}
+
+//////////////////////////////////////////////////
+Tier2Score::CategoryScore ScoringTier2::GetTrajectoryEfficiencyScore(
+    double _minPathLength) const {
+  using CategoryScore = Tier2Score::CategoryScore;
+
+  // Score range and path length bounds (meters).
+  const double kMaxEfficiencyScore = 10.0;  // Shortest path
+  const double kMinEfficiencyScore = 0.0;   // Longest path
+  const double kMaxPathLength = 10.0;       // Path length for min score
+
+  std::stringstream ss;
+  ss << std::fixed << std::setprecision(2);
+  ss << "Total end-effector path length: " << this->totalPathLength << " m"
+     << ", initial plug-port distance: " << _minPathLength << " m";
+
+  const double score = CalculateInverseProportionalScore(
+      kMaxEfficiencyScore, kMinEfficiencyScore, kMaxPathLength, _minPathLength,
+      this->totalPathLength);
+
+  return CategoryScore(score, ss.str());
 }
 
 //////////////////////////////////////////////////
