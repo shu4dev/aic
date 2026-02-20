@@ -94,8 +94,8 @@ allow_all_key_exprs = (
         for topic in allow_topics_bidi
         for expr in [
             f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
-            f"*/{topic.strip("/")}/*/*",
-            f"*/{topic.strip("/")}/*/*/@adv/**",
+            f"*/{topic.strip('/')}/*/*",
+            f"*/{topic.strip('/')}/*/*/@adv/**",
         ]
     ]
     + [
@@ -103,8 +103,8 @@ allow_all_key_exprs = (
         for service in allow_services_bidi
         for expr in [
             f"@ros2_lv/**/%{service.strip('/').replace('/', '%')}/**",
-            f"*/{service.strip("/")}/*/*",
-            f"*/{service.strip("/")}/@adv/**",
+            f"*/{service.strip('/')}/*/*",
+            f"*/{service.strip('/')}/@adv/**",
         ]
     ]
     + [
@@ -113,8 +113,8 @@ allow_all_key_exprs = (
         for sub in ["send_goal", "cancel_goal", "get_result", "feedback", "status"]
         for expr in [
             f"@ros2_lv/**/%{action.strip('/').replace('/', '%')}/**",
-            f"*/{action.strip("/")}/_action/{sub}/*/*",
-            f"*/{action.strip("/")}/_action/{sub}/@adv/**",
+            f"*/{action.strip('/')}/_action/{sub}/*/*",
+            f"*/{action.strip('/')}/_action/{sub}/@adv/**",
         ]
     ]
 )
