@@ -75,11 +75,18 @@ namespace aic_scoring
       return cableName + "/" + plugName + "_link";
     }
 
-    /// \brief Get the name of the pport TF
+    /// \brief Get the name of the port TF
     /// \return Name of the port TF
     public: std::string PortTfName() const {
       return taskBoardName + "/" + targetModuleName + "/" +
           portName + "_link";
+    }
+
+    /// \brief Get the name of the port's entrance TF, used for partial insertion.
+    /// \return Name of the port's entrance TF
+    public: std::string PortEntranceTfName() const {
+      return taskBoardName + "/" + targetModuleName + "/" +
+          portName + "_link_entrance";
     }
   };
 
@@ -261,6 +268,7 @@ namespace aic_scoring
     /// \brief Calculates score for trajectory efficiency (path length).
     /// \param[in] _minPathLength Minimum path length for max score (meters).
     /// This is typically the initial plug-port distance.
+    /// \param[in] _tier3 The result of tier3 scoring.
     /// \return Scoring for the trajectory efficiency category.
     private: Tier2Score::CategoryScore GetTrajectoryEfficiencyScore(
         double _minPathLength) const;
@@ -295,6 +303,11 @@ namespace aic_scoring
     /// \return Scoring for the off limit contacts category
     private: Tier2Score::CategoryScore GetContactsScore() const;
 
+    /// \brief Calculates the score for task duration.
+    /// \param[in] _tier3 The score for the tier3 category, to check if task was successful.
+    /// \return Scoring for the task duration category.
+    private: Tier2Score::CategoryScore GetTaskDurationScore(const Tier3Score& _tier3) const;
+
     /// \brief Wait for the cable and gripper TFs to be received.
     /// \return True if the transform were received, false if timeout occurred.
     private: bool WaitForTfs();
@@ -319,8 +332,6 @@ namespace aic_scoring
     private: std::string bagUri;
 
     /// \brief The time the task started, used for computing task duration.
-    // TODO(luca) Either have an API to reset all state or destroy + rebuild
-    // this class between scoring sessions
     private: std::optional<rclcpp::Time> task_start_time;
 
     /// \brief The time the task ended, used for computing task duration.
@@ -375,7 +386,7 @@ namespace aic_scoring
 
     /// \brief The last tared ft reading rotated to the current pose received.
     private: std::optional<WrenchMsg> lastTaredFt;
-  
+
     /// \brief Total end-effector path length (meters).
     private: double totalPathLength = 0.0;
 
