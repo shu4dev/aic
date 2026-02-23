@@ -31,6 +31,7 @@ allow_topics_eval_to_model_key_exprs = [
     expr
     for topic in allow_topics_eval_to_model
     for expr in [
+        # TODO: these liveliness filters are not working
         # f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
         f"*/{topic.strip('/')}/*/*",
         f"*/{topic.strip('/')}/*/*/@adv/**",
@@ -93,6 +94,7 @@ bidi_key_exprs = (
         expr
         for topic in allow_topics_bidi
         for expr in [
+            # TODO: these liveliness filters are not working
             # f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
             f"*/{topic.strip('/')}/*/*",
             f"*/{topic.strip('/')}/*/*/@adv/**",
@@ -102,6 +104,7 @@ bidi_key_exprs = (
         expr
         for service in allow_services_bidi
         for expr in [
+            # TODO: these liveliness filters are not working
             # f"@ros2_lv/**/%{service.strip('/').replace('/', '%')}/**",
             f"*/{service.strip('/')}/*/*",
             f"*/{service.strip('/')}/@adv/**",
@@ -112,6 +115,7 @@ bidi_key_exprs = (
         for action in allow_actions_bidi
         for sub in ["send_goal", "cancel_goal", "get_result", "feedback", "status"]
         for expr in [
+            # TODO: these liveliness filters are not working
             # f"@ros2_lv/**/%{action.strip('/').replace('/', '%')}/**",
             f"*/{action.strip('/')}/_action/{sub}/*/*",
             f"*/{action.strip('/')}/_action/{sub}/@adv/**",
