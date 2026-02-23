@@ -88,7 +88,7 @@ outgoing_subscriptions = {
     "permission": "allow",
 }
 
-allow_all_key_exprs = (
+bidi_key_exprs = (
     [
         expr
         for topic in allow_topics_bidi
@@ -120,10 +120,10 @@ allow_all_key_exprs = (
 )
 
 
-allow_all = {
-    "id": "allow_all",
+bidi = {
+    "id": "bidi",
     "flows": ["ingress", "egress"],
-    "key_exprs": allow_all_key_exprs + ["@ros2_lv/**/aic_model"],
+    "key_exprs": bidi_key_exprs + ["@ros2_lv/**/aic_model"],
     "messages": [
         "declare_subscriber",
         "put",
@@ -150,11 +150,24 @@ with base_config_path.open() as base_config_fp:
         "enabled": True,
         "default_permission": "deny",
         "rules": [
-            allow_all,
+            bidi,
             outgoing_publications,
             incoming_publications,
             outgoing_subscriptions,
             incoming_subscriptions,
+            {
+                "id": "all_liveliness",
+                "flows": ["ingress", "egress"],
+                "key_exprs": [
+                    "@ros2_lv/**",
+                ],
+                "messages": [
+                    "liveliness_token",
+                    "declare_liveliness_subscriber",
+                    "liveliness_query",
+                ],
+                "permission": "allow",
+            },
         ],
         "subjects": [
             {
@@ -170,7 +183,7 @@ with base_config_path.open() as base_config_fp:
         "policies": [
             {
                 "rules": [
-                    "allow_all",
+                    "bidi",
                     "outgoing_publications",
                     "incoming_subscriptions",
                 ],
@@ -180,6 +193,7 @@ with base_config_path.open() as base_config_fp:
                 "rules": [
                     "incoming_publications",
                     "outgoing_subscriptions",
+                    "all_liveliness",
                 ],
                 "subjects": ["eval"],
             },

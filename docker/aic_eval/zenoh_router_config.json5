@@ -224,7 +224,7 @@
     default_permission: "deny",
     rules: [
       {
-        id: "allow_all",
+        id: "bidi",
         flows: [
           "ingress",
           "egress",
@@ -424,6 +424,22 @@
         ],
         permission: "allow",
       },
+      {
+        id: "all_liveliness",
+        flows: [
+          "ingress",
+          "egress",
+        ],
+        key_exprs: [
+          "@ros2_lv/**",
+        ],
+        messages: [
+          "liveliness_token",
+          "declare_liveliness_subscriber",
+          "liveliness_query",
+        ],
+        permission: "allow",
+      },
     ],
     subjects: [
       {
@@ -439,7 +455,7 @@
     policies: [
       {
         rules: [
-          "allow_all",
+          "bidi",
           "outgoing_publications",
           "incoming_subscriptions",
         ],
@@ -451,6 +467,7 @@
         rules: [
           "incoming_publications",
           "outgoing_subscriptions",
+          "all_liveliness",
         ],
         subjects: [
           "eval",
