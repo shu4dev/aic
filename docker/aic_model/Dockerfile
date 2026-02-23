@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,targ
     cd /ws_aic/src/aic && pixi install --frozen
 
 WORKDIR /ws_aic/src/aic
-COPY --chmod=755 <<"EOF" /entrypoint.sh
+COPY --chmod=755 <<"EOF" /start_model.sh
 #!/bin/bash
 set -e
 
@@ -43,7 +43,7 @@ if ! should_disable_acl; then
   echo "model-router:$AIC_MODEL_ROUTER_PASSWD" >> /credentials.txt
 fi
 
-# start the evaluator
+# start the model
 ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/'"$AIC_MODEL_ROUTER_ADDR"'"]'
 if ! should_disable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="model"'
@@ -54,4 +54,13 @@ export ZENOH_CONFIG_OVERRIDE
 exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
-ENTRYPOINT ["/entrypoint.sh"]
+COPY --chmod=755 <<"EOF" /entrypoint.sh
+#!/bin/bash
+set -e
+
+AIC_DISABLE_ACL=${AIC_DISABLE_ACL:-1} exec /start_model.sh "$@"
+EOF
+
+# Contary to the name, `/entrypoint.sh` is not actually the entrypoint.
+# The name is kept to maintain compatibility as the old entrypoint script does not have ACL.
+ENTRYPOINT ["/start_model.sh"]

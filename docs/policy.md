@@ -160,7 +160,7 @@ For brevity, we will reuse the code from `aic_example_policies`. See the [ROS Po
 
 Terminal 1:
 ```bash
-$ AIC_DISABLE_ACL=1 distrobox enter -r aic_eval -- /entrypoint.sh
+$ distrobox enter -r aic_eval -- /entrypoint.sh
 ```
 
 Terminal 2:
@@ -255,7 +255,7 @@ Open `docker/docker-compose.yaml` and update the model service configuration to 
 
 ```yaml
 	model:
-		image: localhost/aic/aic_model
+		image: localhost/my-solution:v1
 		build:
 			dockerfile: docker/my_policy_node/Dockerfile # <-- replace this line
 			context: ..

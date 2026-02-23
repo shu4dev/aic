@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/ws_aic/build,sharing=locked \
   && rm -rf /ws_aic/log /ws_aic/src
 
 COPY --chmod=644 docker/aic_eval/zenoh_router_config.json5 /zenoh_router_config.json5
-COPY --chmod=755 <<"EOF" /entrypoint.sh
+COPY --chmod=755 <<"EOF" /start_eval.sh
 #!/bin/bash
 set -e
 
@@ -94,4 +94,13 @@ export ZENOH_CONFIG_OVERRIDE
 exec ros2 launch aic_bringup aic_gz_bringup.launch.py "$@"
 EOF
 
-ENTRYPOINT ["/entrypoint.sh"]
+COPY --chmod=755 <<"EOF" /entrypoint.sh
+#!/bin/bash
+set -e
+
+AIC_DISABLE_ACL=${AIC_DISABLE_ACL:-1} exec /start_eval.sh "$@"
+EOF
+
+# Contary to the name, `/entrypoint.sh` is not actually the entrypoint.
+# The name is kept to maintain compatibility as the old entrypoint script does not have ACL.
+ENTRYPOINT ["/start_eval.sh"]

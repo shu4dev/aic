@@ -43,13 +43,13 @@ numpy = ">=1.24.0"
 To build your submission image, run the following command from the **root directory** of your project to ensure the build context includes all necessary files:
 
 ```bash
-docker build -t my-solution:v1 -f docker/aic_model/Dockerfile .
+docker build -t localhost/my-solution:v1 -f docker/aic_model/Dockerfile .
 ```
 
 If you created a custom Dockerfile, use that path instead:
 
 ```bash
-docker build -t my-solution:v1 -f docker/my_policy/Dockerfile .
+docker build -t localhost/my-solution:v1 -f docker/my_policy/Dockerfile .
 ```
 
 ### Verify Locally
@@ -110,7 +110,7 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 You must tag your local image to match the remote repository URI provided to your team. Replace the dummy URI below with your specific team URI:
 
 ```bash
-docker tag my-solution:v1 973918476471.dkr.ecr.us-east-1.amazonaws.com/aic-team/<team_name>:v1
+docker tag localhost/my-solution:v1 973918476471.dkr.ecr.us-east-1.amazonaws.com/aic-team/<team_name>:v1
 ```
 
 > [!IMPORTANT]
