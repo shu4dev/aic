@@ -31,7 +31,7 @@ allow_topics_eval_to_model_key_exprs = [
     expr
     for topic in allow_topics_eval_to_model
     for expr in [
-        f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
+        # f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
         f"*/{topic.strip('/')}/*/*",
         f"*/{topic.strip('/')}/*/*/@adv/**",
     ]
@@ -93,7 +93,7 @@ bidi_key_exprs = (
         expr
         for topic in allow_topics_bidi
         for expr in [
-            f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
+            # f"@ros2_lv/**/%{topic.strip('/').replace('/', '%')}/**",
             f"*/{topic.strip('/')}/*/*",
             f"*/{topic.strip('/')}/*/*/@adv/**",
         ]
@@ -102,7 +102,7 @@ bidi_key_exprs = (
         expr
         for service in allow_services_bidi
         for expr in [
-            f"@ros2_lv/**/%{service.strip('/').replace('/', '%')}/**",
+            # f"@ros2_lv/**/%{service.strip('/').replace('/', '%')}/**",
             f"*/{service.strip('/')}/*/*",
             f"*/{service.strip('/')}/@adv/**",
         ]
@@ -112,7 +112,7 @@ bidi_key_exprs = (
         for action in allow_actions_bidi
         for sub in ["send_goal", "cancel_goal", "get_result", "feedback", "status"]
         for expr in [
-            f"@ros2_lv/**/%{action.strip('/').replace('/', '%')}/**",
+            # f"@ros2_lv/**/%{action.strip('/').replace('/', '%')}/**",
             f"*/{action.strip('/')}/_action/{sub}/*/*",
             f"*/{action.strip('/')}/_action/{sub}/@adv/**",
         ]
@@ -123,7 +123,7 @@ bidi_key_exprs = (
 bidi = {
     "id": "bidi",
     "flows": ["ingress", "egress"],
-    "key_exprs": bidi_key_exprs + ["@ros2_lv/**/aic_model"],
+    "key_exprs": bidi_key_exprs,
     "messages": [
         "declare_subscriber",
         "put",
@@ -186,6 +186,7 @@ with base_config_path.open() as base_config_fp:
                     "bidi",
                     "outgoing_publications",
                     "incoming_subscriptions",
+                    "all_liveliness",
                 ],
                 "subjects": ["all"],
             },
@@ -193,7 +194,6 @@ with base_config_path.open() as base_config_fp:
                 "rules": [
                     "incoming_publications",
                     "outgoing_subscriptions",
-                    "all_liveliness",
                 ],
                 "subjects": ["eval"],
             },
