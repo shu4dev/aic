@@ -10,7 +10,7 @@ preview = ["pixi-build"]
 [dependencies]
 evdev = ">=1.9.2,<2"
 isort = "==5.13.2"
-json5 = ">=0.13.0,<0.14"                                                                     # version bundled by the vscode extension
+json5 = ">=0.13.0,<0.14"                                                               # version bundled by the vscode extension
 opencv = "<4.13.0"
 packaging = ">=24.2,<26.0"                                                             # required by lerobot==0.4.3
 pyright = "==1.1.408"
@@ -40,6 +40,5 @@ lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
 
-[activation.env]
-RMW_IMPLEMENTATION = "rmw_zenoh_cpp"
-ZENOH_CONFIG_OVERRIDE = "transport/shared_memory/enabled=true;transport/shared_memory/transport_optimization/pool_size=536870912"
+[activation]
+scripts = ["pixi_env_setup.sh"]
