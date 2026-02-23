@@ -123,7 +123,7 @@ allow_all_key_exprs = (
 allow_all = {
     "id": "allow_all",
     "flows": ["ingress", "egress"],
-    "key_exprs": allow_all_key_exprs,
+    "key_exprs": allow_all_key_exprs + ["@ros2_lv/**/aic_model"],
     "messages": [
         "declare_subscriber",
         "put",

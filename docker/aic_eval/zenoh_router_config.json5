@@ -278,6 +278,7 @@
           "@ros2_lv/**/%insert_cable/**",
           "*/insert_cable/_action/status/*/*",
           "*/insert_cable/_action/status/@adv/**",
+          "@ros2_lv/**/aic_model",
         ],
         messages: [
           "declare_subscriber",

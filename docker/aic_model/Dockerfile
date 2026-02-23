@@ -53,6 +53,7 @@ if ! should_disable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/dictionary_file="/credentials.txt"'
 fi
 export ZENOH_CONFIG_OVERRIDE
+echo "ZENOH_CONFIG_OVERRIDE=$ZENOH_CONFIG_OVERRIDE"
 exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
