@@ -143,6 +143,8 @@ Simply pushing the image to ECR does not trigger the evaluation. You must notify
 
 ## FAQs
 
+**I cannot use the example dockerfile**: The example dockerfile assumes that you are using `aic_model` to run your policy. If you are not using `aic_model`, you can [create a custom dockerfile](./custom_dockerfile.md).
+
 **My push failed with "no basic auth credentials"**: Your Docker login session has likely expired. ECR login tokens are valid for 12 hours. Repeat the [Authenticate](#authenticate) step in Section 2.
 
 **Where can I see my results?** All your past results and logs can be consulted in the "My submissions" section of the portal. You can also visit the Leaderboard to compare your results against the rest of the teams.
