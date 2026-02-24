@@ -191,7 +191,7 @@ $ pixi add ros-kilted-ros-core
 Unlike a native ROS workspace, a pixi workspace can mix ROS and pypi dependencies.
 
 ```bash
-$ pixi add --pypi pandas
+$ pixi add --pypi torch
 ```
 
 ##### Local dependencies

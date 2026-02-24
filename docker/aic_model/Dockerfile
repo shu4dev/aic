@@ -4,14 +4,14 @@ FROM docker.io/library/ros:kilted-ros-core AS build
 RUN apt update && apt install -y git && curl -fsSL https://pixi.sh/install.sh | bash
 ENV PATH="/root/.pixi/bin:$PATH"
 
-# Build the workspace
+# Add base dependencies
 COPY aic_example_policies /ws_aic/src/aic/aic_example_policies
 COPY aic_model /ws_aic/src/aic/aic_model
 COPY aic_interfaces /ws_aic/src/aic/aic_interfaces
 COPY aic_utils /ws_aic/src/aic/aic_utils
 COPY pixi.toml pixi.lock /ws_aic/src/aic/
 
-# Add other local dependencies
+# Add other dependencies
 
 SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
@@ -67,3 +67,4 @@ EOF
 # Contary to the name, `/entrypoint.sh` is not actually the entrypoint.
 # The name is kept to maintain compatibility as the old entrypoint script does not have ACL.
 ENTRYPOINT ["/start_model.sh"]
+CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.WaveArm"]

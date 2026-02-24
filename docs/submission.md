@@ -13,11 +13,9 @@ Welcome to the **AI for Industry Challenge**. This document outlines the technic
 
 All submissions must be containerized using OCI-compliant image builder like Docker or Podman. Organize your project by placing all policy logic and dependency requirements directly within your custom policy package.
 
-If you don't have any additional packages or dependencies, you can keep your policy code in the re-use the `aic_model` directory with its [Dockerfile](../docker/aic_model/Dockerfile). In this case, simply go to the `docker-compose.yaml`, update the `command: --ros-args -p policy:=aic_example_policies.ros.WaveArm` to `command: --ros-args -p policy:=aic_model.MyPolicy`, and skip to the [Build the Image](#build-the-image) section.
+### Create Your Dockerfile
 
-### Customize Your Dockerfile (Optional)
-
-If you need to add custom packages or dependencies, place your policy code in a new package and create a custom Dockerfile based on the provided [Dockerfile](../docker/aic_model/Dockerfile):
+It is highly recommended to use the example aic_model Dockerfile as a starting point.
 
 ```bash
 mkdir -p docker/my_policy
@@ -27,29 +25,17 @@ cp docker/aic_model/Dockerfile docker/my_policy/
 Then modify `docker/my_policy/Dockerfile` to add your custom policy package:
 
 ```dockerfile
-# Add your custom policy package
-COPY my_policy_node /ws_aic/src/aic/my_policy_node
-```
-
-In particular, if your policy requires additional **Python** packages, add them to `pixi.toml`:
-
-```toml
-[dependencies]
-# ... existing dependencies ...
-torch = ">=2.0.0"
-numpy = ">=1.24.0"
-```
-
-Open `docker/my_policy/Dockerfile` and add your policy node to the build instructions:
-
-```dockerfile
-# Add other local dependencies
+# Add other dependencies
 COPY my_policy_node /ws_aic/src/aic/my_policy_node # <-- Add this line
 ```
 
-### Update `docker-compose.yaml`
+Edit the `CMD` to run your policy:
 
-Docker combines the `ENTRYPOINT` from the Dockerfile (`pixi run --as-is ros2 run aic_model aic_model`) and the `command` from the Compose file (e.g. `--ros-args -p policy:=aic_example_policies.ros.WaveArm`).
+```dockerfile
+CMD ["--ros-args", "-p", "policy:=my_policy_node.MyPolicy"]
+```
+
+### Update `docker-compose.yaml`
 
 Open `docker/docker-compose.yaml` and update the model service configuration to use your Dockerfile and policy:
 
@@ -59,21 +45,14 @@ Open `docker/docker-compose.yaml` and update the model service configuration to 
 		build:
 			dockerfile: docker/my_policy_node/Dockerfile # <-- replace this line
 			context: ..
-		command: --ros-args -p policy:=my_policy_node.MyPolicy # <-- and this line
 ```
 
 ### Build the Image
 
-To build your submission image, run the following command from the **root directory** of your project to ensure the build context includes all necessary files:
+To build your submission image, run the following command from the **root directory** directory:
 
 ```bash
-docker build -t localhost/my-solution:v1 -f docker/aic_model/Dockerfile .
-```
-
-If you created a custom Dockerfile, use that path instead:
-
-```bash
-docker build -t localhost/my-solution:v1 -f docker/my_policy/Dockerfile .
+docker compose -f docker/docker-compose.yaml build model
 ```
 
 ### Verify Locally
