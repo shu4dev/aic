@@ -610,6 +610,7 @@ EngineState Engine::run() {
   // TODO(luca) refactor cleanup into single function
   this->cleanup_model_node();
   this->shutdown_model_node();
+  this->validate_model_shutdown();
   this->score_run(score);
 
   // Count successful and failed trials
@@ -1556,6 +1557,53 @@ bool Engine::shutdown_model_node() {
 }
 
 //==============================================================================
+bool Engine::validate_model_shutdown() const {
+  if (skip_model_ready_) {
+    RCLCPP_INFO(node_->get_logger(),
+                "Skipping model shutdown validation as per parameter.");
+    return true;
+  }
+
+  if (!this->model_discovered_) {
+    return true;
+  }
+
+  auto node_graph = node_->get_node_graph_interface();
+  const auto start = std::chrono::steady_clock::now();
+  const auto timeout = std::chrono::seconds(2);
+
+  while (std::chrono::steady_clock::now() - start < timeout) {
+    const std::size_t pose_pubs =
+        node_graph->count_publishers("/aic_controller/pose_commands");
+    const std::size_t joint_pubs =
+        node_graph->count_publishers("/aic_controller/joint_commands");
+    if (pose_pubs == 0 && joint_pubs == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  // Timed out — report all violations
+  const std::size_t pose_pubs =
+      node_graph->count_publishers("/aic_controller/pose_commands");
+  const std::size_t joint_pubs =
+      node_graph->count_publishers("/aic_controller/joint_commands");
+  if (pose_pubs > 0) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Detected %zu pose command publishers in shutdown state, this "
+                "is not allowed and might affect scoring in the future",
+                pose_pubs);
+  }
+  if (joint_pubs > 0) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Detected %zu joint command publishers in shutdown state, "
+                "this is not allowed and might affect scoring in the future",
+                joint_pubs);
+  }
+  return false;
+}
+
+//==============================================================================
 void Engine::reset_after_trial(const Trial& trial) {
   RCLCPP_INFO(node_->get_logger(), "Resetting after trial completion...");
 
@@ -1565,7 +1613,6 @@ void Engine::reset_after_trial(const Trial& trial) {
   }
 
   is_first_trial_ = false;
-  model_discovered_ = false;
 
   reset_simulator(trial);  // Homes robot by default
 
