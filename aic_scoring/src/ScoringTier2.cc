@@ -21,6 +21,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
 
+#include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -289,6 +290,7 @@ void ScoringTier2::Reset(const std::chrono::seconds &_buffer_size) {
   this->state = State::Idle;
   this->wrenches.clear();
   this->endEffectorPoses.clear();
+  this->endEffectorVelocities.clear();
   this->task_start_time.reset();
   this->task_end_time.reset();
   this->bagWriter.close();
@@ -447,7 +449,18 @@ void ScoringTier2::InsertionEventCallback(const StringMsg &_msg) {
 
 //////////////////////////////////////////////////
 void ScoringTier2::ControllerStateCallback(const ControllerStateMsg &_msg) {
+  auto toSeconds = [](const builtin_interfaces::msg::Time &t) {
+    return static_cast<double>(t.sec) + static_cast<double>(t.nanosec) * 1e-9;
+  };
+
   this->lastTaredFt = _msg.fts_tare_offset;
+  // Duplicated timestamp check
+  const auto stamp = toSeconds(_msg.header.stamp);
+  if (this->endEffectorVelocities.size() > 0 &&
+      this->endEffectorVelocities.back().first == stamp) {
+    return;
+  }
+  this->endEffectorVelocities.push_back({stamp, _msg.tcp_velocity.linear});
 }
 
 //////////////////////////////////////////////////
@@ -520,10 +533,14 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryJerkScore(
     const Tier3Score &_tier3) const {
   using CategoryScore = Tier2Score::CategoryScore;
 
-  const double kMaxJerkScore = 5.0;
+  const double kMaxJerkScore = 6.0;
   const double kMinJerkScore = 0.0;
-  const double kMaxJerkValue = 25000.0;
+  const double kMaxJerkValue = 50.0;
   const double kMinJerkValue = 0.0;
+
+  // Filter parameters, window size in samples. For 500 hz = 30 ms
+  static constexpr std::size_t kWindowSize = 15;
+  static constexpr std::size_t k = kWindowSize / 2;
 
   if (!this->task_end_time.has_value()) {
     return CategoryScore(0, "Task not completed.");
@@ -536,93 +553,70 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryJerkScore(
         "not assigning jerk bonus");
   }
 
-  // Debug output
-  // std::cout << "(" << _tf.transform.translation.x << " " <<
-  // _tf.transform.translation.y
-  //           << " " << _tf.transform.translation.z << ")" << std::endl;
+  if (this->endEffectorVelocities.size() < kWindowSize) {
+    return CategoryScore(0.0,
+                         "Insufficient velocity samples for jerk computation.");
+  }
 
-  // Helper to convert ROS time to seconds.
-  auto toSeconds = [](const builtin_interfaces::msg::Time &t) {
-    return static_cast<double>(t.sec) + static_cast<double>(t.nanosec) * 1e-9;
+  Eigen::MatrixXd A(kWindowSize, 3);
+  Eigen::VectorXd y_x(kWindowSize), y_y(kWindowSize), y_z(kWindowSize);
+
+  auto computeJerk = [&](const std::size_t index) {
+    const auto &data = this->endEffectorVelocities;
+    // Second order (quadratic) polynomial fit to velocity
+    // (y = c0 + c1 * dt + c2 * dt^2)
+
+    const double tCenter = data[index].first;
+
+    for (std::size_t j = 0; j < kWindowSize; ++j) {
+      const std::size_t dataIdx = index - k + j;
+      const double dt = data[dataIdx].first - tCenter;
+
+      // Vandermonde matrix
+      A(j, 0) = 1.0;
+      A(j, 1) = dt;
+      A(j, 2) = dt * dt;
+      // Target values of the polynomial function to be found
+      y_x(j) = data[dataIdx].second.x;
+      y_y(j) = data[dataIdx].second.y;
+      y_z(j) = data[dataIdx].second.z;
+    }
+
+    // Solve for the polynomial coefficients
+    auto qr = A.colPivHouseholderQr();
+    Eigen::VectorXd c_x = qr.solve(y_x);
+    Eigen::VectorXd c_y = qr.solve(y_y);
+    Eigen::VectorXd c_z = qr.solve(y_z);
+
+    // The jerk is the second derivative of the local polynomial approximation,
+    // hence 2 * c2
+    Vector3Msg ret;
+    ret.x = 2.0 * c_x(2);
+    ret.y = 2.0 * c_y(2);
+    ret.z = 2.0 * c_z(2);
+    return ret;
   };
 
   double totalJerkTime = 0.0;
   double accumLinearJerkMagnitude = 0.0;
 
-  for (std::size_t i = 3; i < this->endEffectorPoses.size(); ++i) {
-    // Extract timestamps.
-    double t0 = toSeconds(this->endEffectorPoses[i - 3].header.stamp);
-    double t1 = toSeconds(this->endEffectorPoses[i - 2].header.stamp);
-    double t2 = toSeconds(this->endEffectorPoses[i - 1].header.stamp);
-    double t3 = toSeconds(this->endEffectorPoses[i].header.stamp);
-    // RCLCPP_INFO(this->node->get_logger(), "First stamp is %.6f", t0);
-
-    if (t0 >= t1 || t1 >= t2 || t2 >= t3) {
-      RCLCPP_WARN(this->node->get_logger(),
-                  "Non monotonic timestamps found, %.6f, %.6f, %.6f, %.6f", t0,
-                  t1, t2, t3);
-      continue;
-    }
-
-    // Extract positions.
-    double px[4], py[4], pz[4];
-    px[0] = this->endEffectorPoses[i - 3].transform.translation.x;
-    px[1] = this->endEffectorPoses[i - 2].transform.translation.x;
-    px[2] = this->endEffectorPoses[i - 1].transform.translation.x;
-    px[3] = this->endEffectorPoses[i].transform.translation.x;
-
-    py[0] = this->endEffectorPoses[i - 3].transform.translation.y;
-    py[1] = this->endEffectorPoses[i - 2].transform.translation.y;
-    py[2] = this->endEffectorPoses[i - 1].transform.translation.y;
-    py[3] = this->endEffectorPoses[i].transform.translation.y;
-
-    pz[0] = this->endEffectorPoses[i - 3].transform.translation.z;
-    pz[1] = this->endEffectorPoses[i - 2].transform.translation.z;
-    pz[2] = this->endEffectorPoses[i - 1].transform.translation.z;
-    pz[3] = this->endEffectorPoses[i].transform.translation.z;
-
-    // Compute finite differences for jerk.
-    // v1 = (p1 - p0) / (t1 - t0), etc.
-    // a1 = (v2 - v1) / (midpoint difference)
-    // jerk = (a2 - a1) / (midpoint difference)
-    auto computeJerk = [&](const double p[4]) {
-      double v1 = (p[1] - p[0]) / (t1 - t0);
-      double v2 = (p[2] - p[1]) / (t2 - t1);
-      double v3 = (p[3] - p[2]) / (t3 - t2);
-
-      double mid_v1 = (t0 + t1) / 2.0;
-      double mid_v2 = (t1 + t2) / 2.0;
-      double mid_v3 = (t2 + t3) / 2.0;
-
-      double a1 = (v2 - v1) / (mid_v2 - mid_v1);
-      double a2 = (v3 - v2) / (mid_v3 - mid_v2);
-
-      double mid_a1 = (mid_v1 + mid_v2) / 2.0;
-      double mid_a2 = (mid_v2 + mid_v3) / 2.0;
-
-      return (a2 - a1) / (mid_a2 - mid_a1);
-    };
-
-    // Compute velocity at the central sample (v2) to gate jerk accumulation.
+  for (std::size_t i = k; i < this->endEffectorVelocities.size() - k; ++i) {
+    const auto &v = this->endEffectorVelocities[i].second;
+    constexpr double kVelocityThreshold = 0.01;
+    // Compute velocity at the central sample to gate jerk accumulation.
     // Only accumulate jerk when the arm is actually moving, so that stillness
     // periods don't dilute the average toward zero.
-    double v2x = (px[2] - px[1]) / (t2 - t1);
-    double v2y = (py[2] - py[1]) / (t2 - t1);
-    double v2z = (pz[2] - pz[1]) / (t2 - t1);
-    double speed = std::sqrt(v2x * v2x + v2y * v2y + v2z * v2z);
-
-    constexpr double kVelocityThreshold = 0.01;  // m/s
-    if (speed > kVelocityThreshold) {
-      // Compute linear jerk.
-      double jx = computeJerk(px);
-      double jy = computeJerk(py);
-      double jz = computeJerk(pz);
-
-      double jerkMag = std::sqrt(jx * jx + jy * jy + jz * jz);
-      double dt = (t3 - t0) / 3.0;
-      totalJerkTime += dt;
-      accumLinearJerkMagnitude += jerkMag * dt;
+    const double speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (speed <= kVelocityThreshold) {
+      continue;
     }
+    const auto j = computeJerk(i);
+    const double jerkMag = std::sqrt(j.x * j.x + j.y * j.y + j.z * j.z);
+    const double t0 = this->endEffectorVelocities[i - k].first;
+    const double t1 = this->endEffectorVelocities[i + k].first;
+    const double dt = (t1 - t0) / kWindowSize;
+    totalJerkTime += dt;
+    accumLinearJerkMagnitude += jerkMag * dt;
   }
 
   if (std::abs(totalJerkTime) < 1e-6) {
@@ -632,7 +626,7 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryJerkScore(
     return CategoryScore(0.0, msg);
   }
 
-  double jerk = accumLinearJerkMagnitude / totalJerkTime;
+  const double jerk = accumLinearJerkMagnitude / totalJerkTime;
 
   std::stringstream sstream;
   sstream.setf(std::ios::fixed);
@@ -673,7 +667,7 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryEfficiencyScore(
   }
 
   // Score range and path length bounds (meters).
-  const double kMaxEfficiencyScore = 5.0;              // Shortest path
+  const double kMaxEfficiencyScore = 6.0;              // Shortest path
   const double kMinEfficiencyScore = 0.0;              // Longest path
   const double kMaxPathLength = 1.0 + _minPathLength;  // Path for min score
 
@@ -716,13 +710,13 @@ Tier3Score ScoringTier2::GetDistanceScore() const {
   }
 
   const double kMaxDistance = radiusFromPort;
-  const double kClosestTaskScore = 20.0;
+  const double kClosestTaskScore = 25.0;
   const double kFurthestTaskScore = 0.0;
 
   // Starting partial insertion will award kMinInsertionScore, linear range all
   // the way to the end with kMaxInsertionScore.
-  const double kMinInsertionScore = 30.0;
-  const double kMaxInsertionScore = 40.0;
+  const double kMinInsertionScore = 38.0;
+  const double kMaxInsertionScore = 50.0;
   // The tolerance in x-y within the port to validate that the plug is being
   // inserted.
   const double kEntranceXYTol = 0.005;
@@ -803,8 +797,8 @@ Tier3Score ScoringTier2::GetDistanceScore() const {
 Tier3Score ScoringTier2::ComputeTier3Score() const {
   // Binary will award kInsertionCompletionScore, partial insertion computed
   // in GetDistanceScore (and up to kMaxInsertionScore)
-  constexpr double kInsertionCompletionScore = 60.0;
-  constexpr double kInsertionPenalty = -10.0;
+  constexpr double kInsertionCompletionScore = 75.0;
+  constexpr double kInsertionPenalty = -12.0;
 
   if (!this->task_end_time.has_value()) {
     return Tier3Score(0, "Task not completed.");
@@ -868,7 +862,7 @@ Tier2Score::CategoryScore ScoringTier2::GetInsertionForceScore() const {
   // The sensor reading is tared at startup so its reading is close to 0N.
   const double kForceThreshold = 20.0;
   const double kDurationThreshold = 1.0;
-  const double kPenalty = -10.0;
+  const double kPenalty = -12.0;
 
   double max_force = 0.0;
   double time_above_threshold = 0.0;
@@ -912,7 +906,7 @@ Tier2Score::CategoryScore ScoringTier2::GetInsertionForceScore() const {
 Tier2Score::CategoryScore ScoringTier2::GetContactsScore() const {
   using CategoryScore = Tier2Score::CategoryScore;
   // Apply a fixed penalty if any contact was detected.
-  const double kPenalty = -20.0;
+  const double kPenalty = -24.0;
   if (this->contacts.empty()) {
     return CategoryScore(0, "No contact detected.");
   }
@@ -934,7 +928,7 @@ Tier2Score::CategoryScore ScoringTier2::GetTaskDurationScore(
 
   const rclcpp::Duration kMaxTaskTime = rclcpp::Duration::from_seconds(60.0);
   const rclcpp::Duration kMinTaskTime = rclcpp::Duration::from_seconds(5.0);
-  const double kFastestTaskScore = 10.0;
+  const double kFastestTaskScore = 12.0;
   const double kSlowestTaskScore = 0.0;
 
   if (_tier3.total_score() <= 0) {

@@ -345,30 +345,29 @@ Engine::Engine(const rclcpp::NodeOptions& options)
 }
 
 //==============================================================================
-void Engine::start() {
+EngineState Engine::start() {
   switch (engine_state_) {
     case EngineState::Uninitialized:
       if (this->initialize() != EngineState::Initialized) {
         RCLCPP_ERROR(node_->get_logger(), "Engine failed to initialize");
-        return;
+        return engine_state_;
       }
       [[fallthrough]];
     case EngineState::Initialized:
-      this->run();
-      break;
+      return this->run();
     case EngineState::Running:
       RCLCPP_WARN(node_->get_logger(), "Engine is already running");
-      break;
+      return engine_state_;
     case EngineState::Error:
       RCLCPP_ERROR(node_->get_logger(),
                    "Engine is in error state. Cannot start.");
-      break;
+      return engine_state_;
     case EngineState::Completed:
       RCLCPP_INFO(node_->get_logger(), "Engine has already completed.");
-      break;
+      return engine_state_;
     default:
       RCLCPP_ERROR(node_->get_logger(), "Unknown engine state. Cannot start.");
-      break;
+      return engine_state_;
   }
 }
 
@@ -594,6 +593,10 @@ EngineState Engine::run() {
                 "\033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m");
     TrialScore trial_score = this->handle_trial(trial);
     score.breakdown[trial_id] = trial_score;
+    if (engine_state_ == EngineState::Error) {
+      break;
+    }
+
     if (trial.state == TrialState::AllTasksCompleted) {
       RCLCPP_INFO(
           node_->get_logger(),
@@ -610,6 +613,7 @@ EngineState Engine::run() {
   // TODO(luca) refactor cleanup into single function
   this->cleanup_model_node();
   this->shutdown_model_node();
+  this->validate_model_shutdown();
   this->score_run(score);
 
   // Count successful and failed trials
@@ -625,6 +629,7 @@ EngineState Engine::run() {
 
   RCLCPP_INFO(node_->get_logger(), " ");
   if (engine_state_ == EngineState::Running) {
+    engine_state_ = EngineState::Completed;
     RCLCPP_INFO(node_->get_logger(),
                 "\033[1;32m╔════════════════════════════════════════╗\033[0m");
     RCLCPP_INFO(node_->get_logger(),
@@ -686,6 +691,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
         node_->get_logger(),
         "Attempted to start trial while not Uninitialized. Report this bug.");
     reset_after_trial(trial);
+    engine_state_ = EngineState::Error;
     return score;
   }
 
@@ -715,6 +721,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                    "started?\033[0m",
                    MAX_RETRIES, trial.id.c_str());
       reset_after_trial(trial);
+      engine_state_ = EngineState::Error;
       return score;
     }
   } else {
@@ -753,6 +760,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                    "started?\033[0m",
                    MAX_RETRIES, trial.id.c_str());
       reset_after_trial(trial);
+      engine_state_ = EngineState::Error;
       return score;
     }
   } else {
@@ -761,6 +769,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                  "'%s'\033[0m",
                  trial.id.c_str());
     reset_after_trial(trial);
+    engine_state_ = EngineState::Error;
     return score;
   }
 
@@ -789,6 +798,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                    "started?\033[0m",
                    MAX_RETRIES, trial.id.c_str());
       reset_after_trial(trial);
+      engine_state_ = EngineState::Error;
       return score;
     }
   } else {
@@ -796,6 +806,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                  "\033[1;31m  ✗ Simulator is not ready for trial '%s'\033[0m",
                  trial.id.c_str());
     reset_after_trial(trial);
+    engine_state_ = EngineState::Error;
     return score;
   }
 
@@ -810,6 +821,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
         "\033[1;31m  ✗ Scoring system is not ready for trial '%s'\033[0m",
         trial.id.c_str());
     reset_after_trial(trial);
+    engine_state_ = EngineState::Error;
     return score;
   }
 
@@ -830,6 +842,7 @@ TrialScore Engine::handle_trial(Trial& trial) {
                  "'%s'\033[0m",
                  trial.id.c_str());
     reset_after_trial(trial);
+    engine_state_ = EngineState::Error;
     return score;
   }
 
@@ -1556,6 +1569,53 @@ bool Engine::shutdown_model_node() {
 }
 
 //==============================================================================
+bool Engine::validate_model_shutdown() const {
+  if (skip_model_ready_) {
+    RCLCPP_INFO(node_->get_logger(),
+                "Skipping model shutdown validation as per parameter.");
+    return true;
+  }
+
+  if (!this->model_discovered_) {
+    return true;
+  }
+
+  auto node_graph = node_->get_node_graph_interface();
+  const auto start = std::chrono::steady_clock::now();
+  const auto timeout = std::chrono::seconds(2);
+
+  while (std::chrono::steady_clock::now() - start < timeout) {
+    const std::size_t pose_pubs =
+        node_graph->count_publishers("/aic_controller/pose_commands");
+    const std::size_t joint_pubs =
+        node_graph->count_publishers("/aic_controller/joint_commands");
+    if (pose_pubs == 0 && joint_pubs == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  // Timed out — report all violations
+  const std::size_t pose_pubs =
+      node_graph->count_publishers("/aic_controller/pose_commands");
+  const std::size_t joint_pubs =
+      node_graph->count_publishers("/aic_controller/joint_commands");
+  if (pose_pubs > 0) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Detected %zu pose command publishers in shutdown state, this "
+                "is not allowed and might affect scoring in the future",
+                pose_pubs);
+  }
+  if (joint_pubs > 0) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Detected %zu joint command publishers in shutdown state, "
+                "this is not allowed and might affect scoring in the future",
+                joint_pubs);
+  }
+  return false;
+}
+
+//==============================================================================
 void Engine::reset_after_trial(const Trial& trial) {
   RCLCPP_INFO(node_->get_logger(), "Resetting after trial completion...");
 
@@ -1565,7 +1625,6 @@ void Engine::reset_after_trial(const Trial& trial) {
   }
 
   is_first_trial_ = false;
-  model_discovered_ = false;
 
   reset_simulator(trial);  // Homes robot by default
 
