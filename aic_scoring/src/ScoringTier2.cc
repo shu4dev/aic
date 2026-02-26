@@ -214,8 +214,7 @@ std::pair<Tier2Score, Tier3Score> ScoringTier2::ComputeScore() {
                msg_ptr->topic_name == kScoringTfTopic) {
       const auto msg = deserialize_from_rosbag<TFMsg>(msg_ptr);
       this->TfCallback(msg);
-    } else if (msg_ptr->topic_name == kTfStaticTopic ||
-               msg_ptr->topic_name == kScoringTfStaticTopic) {
+    } else if (msg_ptr->topic_name == kTfStaticTopic) {
       const auto msg = deserialize_from_rosbag<TFMsg>(msg_ptr);
       this->TfStaticCallback(msg);
     } else if (msg_ptr->topic_name == kContactsTopic) {
@@ -697,6 +696,11 @@ Tier3Score ScoringTier2::GetDistanceScore() const {
   //   and port entrance + maxDistance. The maxDistance is set to half of the
   //   initial plug-port distance.
   //   This score is always lower than a partial insertion score.
+
+  if (!this->task_start_time.has_value()) {
+    return Tier3Score(0,
+                      "Distance computation failed, task start time not set");
+  }
 
   // Being as close as possible to the port entrance will award
   // kClosestTaskScore
