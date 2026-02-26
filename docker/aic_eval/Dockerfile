@@ -56,6 +56,7 @@ fi
 # start the eval router
 unset ZENOH_ROUTER_CONFIG_URI
 ZENOH_CONFIG_OVERRIDE='listen/endpoints=["tcp/[::]:7448"]'
+ZENOH_CONFIG_OVERRIDE+=';routing/router/peers_failover_brokering=true'
 if ! should_disable_acl; then
   export ZENOH_ROUTER_CONFIG_URI=/zenoh_router_config.json5
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval-router"'
@@ -63,6 +64,7 @@ if ! should_disable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/dictionary_file="/credentials.txt"'
 fi
 export ZENOH_CONFIG_OVERRIDE
+echo "ZENOH_CONFIG_OVERRIDE_EVAL_ROUTER=$ZENOH_CONFIG_OVERRIDE"
 ros2 run rmw_zenoh_cpp rmw_zenohd &
 ZENOH_EVAL_ROUTER_PID=$!
 
@@ -75,9 +77,8 @@ if ! should_disable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"$AIC_MODEL_ROUTER_PASSWD"'"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/dictionary_file="/credentials.txt"'
   export ZENOH_CONFIG_OVERRIDE
-else
-  unset ZENOH_CONFIG_OVERRIDE
 fi
+echo "ZENOH_CONFIG_OVERRIDE_MODEL_ROUTER=$ZENOH_CONFIG_OVERRIDE"
 ros2 run rmw_zenoh_cpp rmw_zenohd &
 ZENOH_MODEL_ROUTER_PID=$!
 
