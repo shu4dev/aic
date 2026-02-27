@@ -113,8 +113,6 @@ cp /tmp/aic.sdf ~/training_scenarios/sc_right_rotated.sdf
 
 ### Teleoperation
 
-To manually control the robot and get familiar with the environment:
-
 **Teleoperate the robot** in joint-space or Cartesian-space to:
 - Explore the workspace
 - Test cable insertion manually

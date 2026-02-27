@@ -88,64 +88,20 @@ curl -fsSL https://pixi.sh/install.sh | sh
 
 For other operating systems, refer to the [Alternative Installation Methods](https://pixi.prefix.dev/latest/installation/#alternative-installation-methods).
 
+> [!IMPORTANT]
+> Changes to packages within a Pixi environment are not tracked automatically. To apply updates, you must run `pixi reinstall <package_name>`.
 
 ## Quick Start
 
 This section will guide you through:
-
-1. **Running the Evaluation Component** - Start the `aic_eval` container to bring up the simulation environment, robot, sensors, and scoring system
-2. **Setting Up Your Workspace** - Clone the challenge repository and install dependencies using Pixi
+1. **Setting Up Your Workspace** - Clone the challenge repository and install dependencies using Pixi
+2. **Running the Evaluation Component** - Start the `aic_eval` container to bring up the simulation environment, robot, sensors, and scoring system
 3. **Running an Example Policy** - Execute a provided example policy from your local workspace against the evaluation container
 
 Once you've completed these steps and want to prepare your submission, see the [Submission Guidelines](./submission.md) to learn how to containerize your participant workspace.
 
 ---
-
-### Step 1: Start the Evaluation Container
-
-```bash
-# Indicate distrobox to use Docker as container manager
-export DBX_CONTAINER_MANAGER=docker
-
-# Create and enter the eval container
-docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-# If you have an NVIDIA GPU, see tip below on adding the --nvidia flag for GPU support
-distrobox create -r -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
-distrobox enter -r aic_eval
-
-# Inside the container, start the environment
-/entrypoint.sh ground_truth:=false start_aic_engine:=true
-```
-
-The [`entrypoint.sh`](../docker/aic_eval/Dockerfile) script runs a Zenoh router and the [`aic_gz_bringup.launch.py`](../aic_bringup/README.md#1-aic_gz_bringuplaunchpy) launch file.
-
-> [!NOTE]
-> The evaluation container is essentially a pre-built workspace and `/entrypoint.sh` is not the only way to use it. You can enter the container, source the workspace (`source /ws_aic/install/setup.bash`), and run or launch any of the commands described in any of the package READMEs and documentation.
-
-**What you should see:**
-- Two windows open: **Gazebo** (simulation) and **RViz** (visualization)
-- In Gazebo: A workcell with a Universal Robots UR5e manipulator mounted on a table
-- In the terminal: Log messages indicating the AIC engine has initialized and is waiting for the `aic_model` node
-- No robot movement yet (the robot is waiting for your policy to connect)
-
-![Evaluation Environment](../../media/eval_environment_waiting.png)
-
-See [Scene Description](./scene_description.md) for more details about the simulation environment.
-
-> [!TIP]
-> If you have an NVIDIA GPU, create the distrobox container with GPU support for optimal performance:
-> ```bash
-> distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
-> ```
-
-> [!Note]
-> If the `docker pull` command fails, you may need to [log in to ghcr.io](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
-
-
-
----
-
-### Step 2: Set Up Your Workspace
+### Step 1: Set Up Your Workspace
 
 ```bash
 # Clone this repo
@@ -164,12 +120,50 @@ pixi install
 - A `.pixi` directory created in your workspace with all dependencies
 
 ---
+### Step 2: Start the Evaluation Container
+
+```bash
+# Indicate distrobox to use Docker as container manager
+export DBX_CONTAINER_MANAGER=docker
+
+# Create and enter the eval container
+docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
+# If you do *not* have an NVIDIA GPU, remove the --nvidia flag for GPU support
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
+distrobox enter -r aic_eval
+
+# Inside the container, start the environment
+/entrypoint.sh ground_truth:=false start_aic_engine:=true
+```
+
+The [`entrypoint.sh`](../docker/aic_eval/Dockerfile) script runs a Zenoh router and the [`aic_gz_bringup.launch.py`](../aic_bringup/README.md#1-aic_gz_bringuplaunchpy) launch file with `aic_engine`.
+
+> [!NOTE]
+> The evaluation container is essentially a pre-built workspace and `/entrypoint.sh` is not the only way to use it. You can enter the container, source the workspace (`source /ws_aic/install/setup.bash`), and run or launch any of the commands described in any of the package READMEs and documentation.
+
+**What you should see:**
+- Two windows open: **Gazebo** (simulation) and **RViz** (visualization)
+- In Gazebo: A workcell with a Universal Robots UR5e manipulator mounted on a table
+- In the terminal: Log messages indicating the AIC engine has initialized and is waiting for the `aic_model` node (`No node with name 'aic_model' found. Retrying...`)
+- No robot movement yet (the robot is waiting for your policy to connect)
+
+![Evaluation Environment](../../media/eval_environment_waiting.png)
+
+See [Scene Description](./scene_description.md) for more details about the simulation environment.
+
+> [!Note]
+> If the `docker pull` command fails, you may need to [log in to ghcr.io](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
+
+> [!NOTE]
+> The `aic_engine` node in the evaluation container expects to find the `aic_model` node (see Step 3) within 30 seconds, after which it will time out. However, since the evaluation container starts the Zenoh router, this step (`/entrypoint.sh`) must be run *before* starting the `aic_model` node in Step 3.
+
+---
 
 ### Step 3: Run an Example Policy
 
-With the simulation environment running, run the following policy (Note that `aic_engine` has a timeout period waiting for a policy to connect):
+With the simulation environment running (Step 2), run the following policy:
 ```bash
-# Within the pixi workspace in ~/ws_aic/src/aic
+cd ~/ws_aic/src/aic
 pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.WaveArm
 ```
 
