@@ -7,4 +7,4 @@ ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="CHANGE_IN_PROD"'
 ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/dictionary_file="'"$CREDENTIALS"'"'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 export ZENOH_CONFIG_OVERRIDE
-export ZENOH_ROUTER_CONFIG_URI="$(readlink -f "$HERE"/zenoh_router_config.json5)"
+export ZENOH_SESSION_CONFIG_URI="$(readlink -f "$HERE"/aic_zenoh_config.json5)"

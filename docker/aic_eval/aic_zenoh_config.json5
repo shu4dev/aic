@@ -9,7 +9,7 @@
   // id: "1234567890abcdef",
 
   /// The node's mode (router, peer or client)
-  mode: "router",
+  mode: "peer",
 
   /// Which endpoints to connect to. E.g. tcp/localhost:7447.
   /// By configuring the endpoints, it is possible to tell zenoh which router/peer to connect to at startup.
@@ -40,7 +40,7 @@
     ///
     /// See https://docs.rs/zenoh/latest/zenoh/config/struct.EndPoint.html
     endpoints: [
-      // "<proto>/<address>"
+      "tcp/localhost:7447"
     ],
 
     /// Global connect configuration,
@@ -88,7 +88,7 @@
     /// or different lists for router, peer and client (e.g. endpoints: { router: ["tcp/[::]:7447"], peer: ["tcp/[::]:0"] }).
     ///
     /// See https://docs.rs/zenoh/latest/zenoh/config/struct.EndPoint.html
-    endpoints: ["tcp/[::]:7447"],
+    endpoints: ["tcp/localhost:0"],
 
     /// Global listen configuration,
     /// Accepts a single value or different values for router, peer and client.
