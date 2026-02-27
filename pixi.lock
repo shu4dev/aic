@@ -7568,7 +7568,7 @@ packages:
   - ros-kilted-trajectory-msgs
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -7614,7 +7614,7 @@ packages:
   - ros-kilted-trajectory-msgs
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -7666,7 +7666,7 @@ packages:
   - ros-kilted-trajectory-msgs
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -7714,7 +7714,7 @@ packages:
   - ros-kilted-trajectory-msgs
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -7752,7 +7752,7 @@ packages:
   - ros-kilted-rosidl-default-runtime
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -7786,7 +7786,7 @@ packages:
   - ros-kilted-rclpy
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
@@ -10353,7 +10353,7 @@ packages:
   - ros-kilted-std-msgs
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=21
+  - libcxx >=22
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
   license: LicenseRef-Apache-2.0
