@@ -38,3 +38,5 @@ If, instead, this terminal has the environment variables associated with the `ev
 . src/aic/docker/aic_eval/zenoh_config_eval_session.sh
 ros2 service call /gz_server/get_entities_states simulation_interfaces/srv/GetEntitiesStates
 ```
+
+Note that the `eval` identity is protected by a password, which will be different when it is running in the submission portal :smile:
