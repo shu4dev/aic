@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,targ
     cd /ws_aic/src/aic && pixi install --locked
 
 WORKDIR /ws_aic/src/aic
-COPY --chmod=755 <<"EOF" /start_model.sh
+COPY --chmod=755 <<"EOF" /entrypoint.sh
 #!/bin/bash
 set -e
 
@@ -56,14 +56,5 @@ echo "ZENOH_CONFIG_OVERRIDE=$ZENOH_CONFIG_OVERRIDE"
 exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
-COPY --chmod=755 <<"EOF" /entrypoint.sh
-#!/bin/bash
-set -e
-
-AIC_ENABLE_ACL=${AIC_ENABLE_ACL:-1} exec /start_model.sh "$@"
-EOF
-
-# Contary to the name, `/entrypoint.sh` is not actually the entrypoint.
-# The name is kept to maintain compatibility as the old entrypoint script does not have ACL.
-ENTRYPOINT ["/start_model.sh"]
-CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.WaveArm"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.CheatCode"]
