@@ -113,8 +113,6 @@ cp /tmp/aic.sdf ~/training_scenarios/sc_right_rotated.sdf
 
 ### Teleoperation
 
-To manually control the robot and get familiar with the environment:
-
 **Teleoperate the robot** in joint-space or Cartesian-space to:
 - Explore the workspace
 - Test cable insertion manually
@@ -146,6 +144,9 @@ The simulation includes a world plugin that automatically exports the complete w
 - **Plugin Configuration:** Defined in [`aic.sdf`](../aic_description/world/aic.sdf) with parameters:
   - `<save_world_path>`: Path where the world file is saved (default: `/tmp/aic.sdf`)
   - `<save_world_delay_s>`: Delay in simulation seconds before exporting (default: `0.0`)
+
+> [!NOTE]
+> **MuJoCo Integration:** The AIC environment supports exporting and training policies natively in MuJoCo. Exported scenarios can be converted to MJCF format and run with the same ROS 2 control interfaces used in Gazebo. For detailed instructions on simulation setup, converting Gazebo worlds, and using `ros2_control` in MuJoCo, see the [MuJoCo Integration Guide](../aic_utils/aic_mujoco/README.md).
 
 ---
 

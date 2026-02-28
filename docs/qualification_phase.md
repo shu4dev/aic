@@ -14,7 +14,7 @@ Here is how we are addressing physics discrepancies:
 
 ## 1. Phase Setup & Constraints
 
-* **Task Scope:** A single cable insertion is evaluated per trial. Only one plug on the cable is tested for insertion; the other end of the cable remains free and unconnected.
+* **Task Scope:** A single cable insertion is evaluated per trial. Only one plug on the cable is tested for insertion; the other end of the cable remains free and unconnected. During evaluation, the only plug-port insertions and cable involved will be `SFP_MODULE` to `SFP_PORT` and `SC_PLUG` to `SC_PORT`. The same flexible cable is used across trials. However, the general configuration of the task board will vary (e.g., the number and placement of NIC cards and SC ports), and the task definition will clearly specify which port in which component the grasped plug needs to be inserted into. This task definition is described by the [`aic_task_interfaces/msg/Task.msg`](../aic_interfaces/aic_task_interfaces/msg/Task.msg) message and is forwarded to the participant model via a ROS 2 action request. If you are using the provided Python template, this `Task` object is available directly as a parameter to the `Policy.insert_cable` method. 3D assets for all these components can be found in the [`aic_assets/models`](../aic_assets/models/) directory. No unseen plug or port types will be presented.
 * **Environment:** Evaluated in Gazebo without Flowstate.
 * **Robot State:** The robot starts with one plug already in-hand.
 * **Proximity:** The robot starts within a few centimeters of the insertion target.
@@ -29,6 +29,9 @@ The same policy submitted by the participant will be used for all three trials.
 
 In each trial, the robot spawns at a pre-specified (not random) pose, and the cable plug is fixed in its gripper.
 
+> [!NOTE]
+> The exact number and sequence of trials during final evaluation may be subject to change. However, they will always consist of some combination of the SFP and SC insertions described below.
+
 ### Trial 1 and 2: Policy validity and convergence
 
 ![TRIAL 1](../../media/aic_board_trial_1_sfp.png)
@@ -37,8 +40,8 @@ In each trial, the robot spawns at a pre-specified (not random) pose, and the ca
 
 * **Start State:**
 	* The robot is grasping the `SFP_MODULE` plug end of an [sfp_sc_cable](../aic_assets/models/sfp_sc_cable/).
-	* The task board is spawned with a randomized pose (position and orientation).
-	* One `NIC_CARD` is mounted on a randomly selected `NIC_RAIL` (one of 5 rails: `nic_rail_0` through `nic_rail_4`) with a random translation and orientation offset.
+	* The task board is spawned with a randomized pose (position and yaw angle). While multiple components and NIC cards may be present on the board, the specific target port of interest will always be within view of the robot cameras.
+	* One or more `NIC_CARD`s are mounted on randomly selected `NIC_RAIL`s (there are 5 rails: `nic_rail_0` through `nic_rail_4`) each with a random translation (along its rail) and a random yaw offset.
 	* The opposite end of the cable (SC plug) remains free and unconnected.
 
 * **Manipulation Task:** Insert the grasped `SFP_MODULE` plug into either `SFP_PORT_0` or `SFP_PORT_1` on the spawned NIC card (the task config from `aic_engine` will specify which).
@@ -51,8 +54,8 @@ In each trial, the robot spawns at a pre-specified (not random) pose, and the ca
 
 * **Start State:**
 	* The robot is grasping the `SC_PLUG` end of the same [sfp_sc_cable](../aic_assets/models/sfp_sc_cable/).
-	* The task board is spawned with a randomized pose (position and orientation).
-	* SC ports are mounted on the task board: `SC_PORT_0` on `SC_RAIL_0` and `SC_PORT_1` on `SC_RAIL_1`, each with random translation and orientation offsets.
+	* The task board is spawned with a randomized pose (position and yaw angle). While multiple components and SC ports may be present on the board, the specific target port of interest will always be within view of the robot cameras.
+	* One or both SC ports are mounted on the task board: `SC_PORT_0` on `SC_RAIL_0` and `SC_PORT_1` on `SC_RAIL_1`, each with a random translation along its rail. Only one SC port will be the target port.
 	* The opposite end of the cable (SFP module) remains free and unconnected.
 
 * **Manipulation Task:** Insert the grasped `SC_PLUG` into one of the SC ports (`SC_PORT_0` or `SC_PORT_1`, as specified by `aic_engine`), ensuring alignment with the task board's SC rails.
