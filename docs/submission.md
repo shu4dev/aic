@@ -68,6 +68,7 @@ docker compose -f docker/docker-compose.yaml up
 > [!WARNING]
 > Do not skip local verification. If your container fails to start or crashes during the local evaluation, it will be automatically rejected by the submission portal, which may count against your daily submission limit.
 
+A description of the Zenoh access controls used to prevent minimal "cheating" solutions that simply subscribe to the simulator's internal data structures are described in the [Access Control](access_control.md) document.
 ---
 
 ## 2. Upload Your Image to Our Registry
