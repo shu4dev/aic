@@ -1,8 +1,8 @@
 name: aic
 services:
   eval:
-    image: localhost/my-eval:v1
-    # image: ghcr.io/intrinsic-dev/aic/aic_eval
+    image: ghcr.io/intrinsic-dev/aic/aic_eval
+    # image: localhost/my-eval:v1
     build:
       dockerfile: docker/aic_eval/Dockerfile
       context: ..
@@ -13,6 +13,7 @@ services:
     environment:
       AIC_EVAL_PASSWD: CHANGE_IN_PROD
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      # AIC_ENABLE_ACL: true
   model:
     image: localhost/my-solution:v1
     build:
@@ -24,8 +25,9 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
-      AIC_MODEL_ROUTER_ADDR: eval:7447
+      AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      # AIC_ENABLE_ACL: true
 networks:
   default:
     internal: true
