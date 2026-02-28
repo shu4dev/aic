@@ -2,13 +2,14 @@
 
 The example dockerfile assumes that you are using `aic_model` to run your policy. If you are not using `aic_model`, you need to create a custom dockerfile.
 
-This document assumes you have advanced knowledge of ROS2 middlewares, zenoh and docker.
+This document assumes you have advanced knowledge of ROS 2 middleware concepts, Zenoh and Docker.
 
-## 1. ROS2 and rmw_zenoh_cpp
+## 1. ROS 2 and rmw_zenoh_cpp
 
 A policy node is essentially a ROS 2 node that subscribes to observations and publishes actions to be executed.
+For convenience, the example policy use a Python ROS node named `aic_model` which instantiates a `Policy` class that implements the actual policy, to factor out as much boilerplate as possible.
 
-ROS2 is middleware agnostic, for the AI for Industry Challenge, `rmw_zenoh_cpp` is used exclusively. Your dockerfile **must** run your policy node with `rmw_zenoh_cpp`. This is usually done by setting the `RMW_IMPLEMENTATION` environment variable to `rmw_zenoh_cpp`.
+ROS 2 is middleware agnostic, but for the AI for Industry Challenge, `rmw_zenoh_cpp` is used exclusively. Your dockerfile **must** run your policy node with `rmw_zenoh_cpp`. This is usually done by setting the `RMW_IMPLEMENTATION` environment variable to `rmw_zenoh_cpp`.
 
 This is automatically set when running your image, you must ensure that your dockerfile do not override it and it also must have `rmw_zenoh_cpp` available.
 
@@ -18,18 +19,15 @@ During evaluation, your image will be ran with the following environment variabl
 
 | Variable                    | Description                                                                                                     |
 | :-------------------------- | :-------------------------------------------------------------------------------------------------------------- |
-| RMW_IMPLEMENTATION          | ROS2 middleware to use, always set to `rmw_zenoh_cpp`                                                           |
+| RMW_IMPLEMENTATION          | ROS 2 middleware to use. Always set to `rmw_zenoh_cpp`                                                          |
 | ZENOH_ROUTER_CHECK_ATTEMPTS | Always set to `-1`, prevents your container from erroring out when it launches before the model router is ready |
 | AIC_MODEL_ROUTER_ADDR       | Zenoh router address that your policy node must connect to                                                      |
 | AIC_MODEL_PASSWD            | Password that you must use to identify your policy node                                                         |
-| AIC_MODEL_ROUTER_PASSWD     | Password that you must allow the model router to use                                                            |
-
 
 Your policy node **must**:
 
 1. Connect to the zenoh router given in `AIC_MODEL_ROUTER_ADDR` environment variable.
 2. Use user-password authentication with the user `model` and password given in `AIC_MODEL_PASSWD`.
-3. The model router will identify itself as the user `model-router` with the password given in `AIC_MODEL_ROUTER_PASSWD`. You must allow messages to/from the model router.
 
 The easiest way is to set `ZENOH_CONFIG_OVERRIDE` to something like:
 
@@ -41,7 +39,6 @@ You also need to create the credentials file, you can use something like:
 
 ```bash
 echo "model:$AIC_MODEL_PASSWD" >> /credentials.txt
-echo "model-router:$AIC_MODEL_ROUTER_PASSWD" >> /credentials.txt
 ```
 
 See https://github.com/ros2/rmw_zenoh and https://zenoh.io/docs/manual/access-control/ for more information.
