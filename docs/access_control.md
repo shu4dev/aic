@@ -4,6 +4,8 @@ The evaluation system uses a Zenoh access control list (ACL) to ensure that subm
 
 To replicate the security provided by the submission environment, you can run the environment and your model submission with Zenoh security enabled. This will result in Zenoh blocking access to certain topics and services, such as those in the `gz_server` namespace, to prevent cheating.
 
+## Test with separate terminals
+
 The following demonstration shows the Zenoh access controls in operation. All of these steps are performed automatically by Docker in the submission portal, but they are shown here manually on the command line for interactivity and clarity. These steps can be useful for local testing, to make sure no unauthorized topics or services are being used.
 
 ### Terminal 1: Start the Zenoh router with ACL
@@ -40,3 +42,17 @@ ros2 service call /gz_server/get_entities_states simulation_interfaces/srv/GetEn
 ```
 
 Note that the `eval` identity is protected by a password, which will be different when it is running in the submission portal :smile:
+
+## Test with docker-compose
+
+Docker-compose provides a convenient way to test the interactions between the evaluation container and the model containers:
+
+First, build the containers:
+```
+docker compose -f docker/docker-compose.yaml build
+```
+
+Next, run them:
+```
+docker copose -f docker/docker-compose.yaml up
+```

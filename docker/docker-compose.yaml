@@ -2,7 +2,7 @@ name: aic
 services:
   eval:
     image: ghcr.io/intrinsic-dev/aic/aic_eval
-    # image: localhost/my-eval:v1
+    # image: my-eval:v1
     build:
       dockerfile: docker/aic_eval/Dockerfile
       context: ..
@@ -15,7 +15,7 @@ services:
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
   model:
-    image: localhost/my-solution:v1
+    image: my-solution:v1
     build:
       dockerfile: docker/aic_model/Dockerfile
       context: ..
