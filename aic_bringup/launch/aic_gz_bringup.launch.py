@@ -172,16 +172,9 @@ def launch_setup(context, *args, **kwargs):
             "joint_state_broadcaster",
             "--controller-manager",
             "/controller_manager",
+            "--service-call-timeout",
+            "30",
         ],
-    )
-
-    # Delay rviz start after `joint_state_broadcaster`
-    delay_rviz_after_joint_state_broadcaster_spawner = RegisterEventHandler(
-        event_handler=OnProcessExit(
-            target_action=joint_state_broadcaster_spawner,
-            on_exit=[rviz_node],
-        ),
-        condition=IfCondition(launch_rviz),
     )
 
     # There may be other controllers of the joints, but this is the initially-started one
@@ -212,7 +205,13 @@ def launch_setup(context, *args, **kwargs):
     fts_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["fts_broadcaster", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "fts_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+            "--service-call-timeout",
+            "30",
+        ],
     )
 
     aic_adapter = Node(
@@ -378,13 +377,45 @@ def launch_setup(context, *args, **kwargs):
         condition=IfCondition(ground_truth),
     )
 
+    delay_basic_controllers_after_spawn = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=gz_spawn_entity,
+            on_exit=[joint_state_broadcaster_spawner, fts_broadcaster_spawner],
+        )
+    )
+
+    delay_initial_controller_after_broadcaster = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=joint_state_broadcaster_spawner,
+            on_exit=[
+                initial_joint_controller_spawner_started,
+                initial_joint_controller_spawner_stopped,
+            ],
+        )
+    )
+
+    delay_rviz_after_controller_started = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=initial_joint_controller_spawner_started,
+            on_exit=[rviz_node],
+        ),
+        condition=IfCondition(launch_rviz),
+    )
+
+    delay_rviz_after_controller_stopped = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=initial_joint_controller_spawner_stopped,
+            on_exit=[rviz_node],
+        ),
+        condition=IfCondition(launch_rviz),
+    )
+
     nodes_to_start = [
         robot_state_publisher_node,
-        joint_state_broadcaster_spawner,
-        delay_rviz_after_joint_state_broadcaster_spawner,
-        initial_joint_controller_spawner_stopped,
-        initial_joint_controller_spawner_started,
-        fts_broadcaster_spawner,
+        delay_basic_controllers_after_spawn,
+        delay_initial_controller_after_broadcaster,
+        delay_rviz_after_controller_started,
+        delay_rviz_after_controller_stopped,
         aic_adapter,
         gz_ip_env,
         gzserver,
