@@ -165,8 +165,6 @@ Terminal 1:
 $ distrobox enter -r aic_eval -- /entrypoint.sh
 ```
 
-<!-- TODO: Update instruction to disable ACL after https://github.com/intrinsic-dev/aic/pull/190 or https://github.com/intrinsic-dev/aic/pull/171 is merged. -->
-
 Terminal 2:
 ```bash
 $ pixi reinstall ros-kilted-my-policy-node
@@ -195,7 +193,7 @@ $ pixi add ros-kilted-ros-core
 Unlike a native ROS workspace, a pixi workspace can mix ROS and pypi dependencies.
 
 ```bash
-$ pixi add --pypi pandas
+$ pixi add --pypi torch
 ```
 
 ##### Local dependencies
