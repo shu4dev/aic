@@ -411,7 +411,7 @@
               max_wait_before_drop_fragments: 50000,
             },
             block: {
-              wait_before_close: 5000000,
+              wait_before_close: 60000000,
             },
           },
           batching: {
