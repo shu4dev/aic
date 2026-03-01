@@ -11,7 +11,7 @@ The following demonstration shows the Zenoh access controls in operation. All of
 ### Terminal 1: Start the Zenoh router with ACL
 
 ```
-. install/setup.bash 
+. install/setup.bash
 . src/aic/docker/aic_eval/zenoh_config_router.sh
 ros2 run rmw_zenoh_cpp rmw_zenohd
 ```
@@ -22,6 +22,7 @@ The following commands launch the simulation environment with some entities spaw
 ```
 . install/setup.bash
 . src/aic/docker/aic_eval/zenoh_config_eval_session.sh
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ros2 launch aic_bringup aic_gz_bringup.launch.py nic_card_mount_0_present:=true sc_port_0_present:=true ground_truth:=false spawn_task_board:=true spawn_cable:=true attach_cable_to_gripper:=true sfp_mount_rail_0_present:=true cable_type:=sfp_sc_cable
 ```
 
@@ -29,6 +30,7 @@ ros2 launch aic_bringup aic_gz_bringup.launch.py nic_card_mount_0_present:=true 
 ```
 . install/setup.bash
 . src/aic/docker/aic_model/zenoh_config_model_session.sh
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ros2 service call /gz_server/get_entities_states simulation_interfaces/srv/GetEntitiesStates
 ```
 
@@ -38,6 +40,7 @@ If, instead, this terminal has the environment variables associated with the `ev
 ```
 . install/setup.bash
 . src/aic/docker/aic_eval/zenoh_config_eval_session.sh
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ros2 service call /gz_server/get_entities_states simulation_interfaces/srv/GetEntitiesStates
 ```
 
