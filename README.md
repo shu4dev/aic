@@ -197,4 +197,6 @@ sudo systemctl status dcvserver
 sudo dcv create-session my-console-session --type=console --owner ubuntu
 
 sudo passwd ubuntu
+
+scp -r -i your-key.pem ubuntu@<ec2-ip>:/path/to/folder ./local-destination/
 ```
