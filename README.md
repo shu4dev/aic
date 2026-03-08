@@ -187,3 +187,16 @@ Manages trial execution, validates participant models, and collects scoring data
 
 This project is licensed under the Apache License 2.0 - see the individual package files for details.
 The [aic_isaac](./aic_utils/aic_isaac/) folder contains files licensed under BSD-3 - see [aic_isaac/LICENSE](./aic_utils/aic_isaac/LICENSE).
+
+## AWS EC2 DCV Server Note
+```shell
+sudo systemctl start dcvserver
+
+sudo systemctl status dcvserver
+
+sudo dcv create-session my-console-session --type=console --owner ubuntu
+
+sudo passwd ubuntu
+
+scp -r -i your-key.pem ubuntu@<ec2-ip>:/path/to/folder ./local-destination/
+```
