@@ -73,6 +73,8 @@ class RunOpenVLA(Policy):
 
             # Run inference
             inputs = self.processor(prompt, pil_image).to(self.device, dtype=torch.bfloat16)
+            self.get_logger().info(f"unnorm_key={self.unnorm_key}, inputs keys={list(inputs.keys())}")
+
             with torch.inference_mode():
                 action = self.vla.predict_action(
                     **inputs,
