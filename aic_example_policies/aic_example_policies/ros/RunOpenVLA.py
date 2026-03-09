@@ -56,58 +56,57 @@ class RunOpenVLA(Policy):
         **kwargs,
     ):
         self.get_logger().info(f"RunOpenVLA.insert_cable() enter. Task: {task}")
+        try:
+            prompt = f"In: What action should the robot take to {self.task_instruction}?\nOut:"
+            start_time = time.time()
+            while time.time() - start_time < 30.0:
+                loop_start = time.time()
+                obs_msg = get_observation()
+                if obs_msg is None:
+                    self.get_logger().warn("No observation received")
+                    continue
 
-        prompt = f"In: What action should the robot take to {self.task_instruction}?\nOut:"
+                pil_image = self._ros_img_to_pil(obs_msg.center_image)
+                self.get_logger().info(f"Image size: {pil_image.size}, unnorm_key: {self.unnorm_key}")
 
-        start_time = time.time()
+                inputs = self.processor(prompt, pil_image).to(self.device, dtype=torch.bfloat16)
+                self.get_logger().info(f"Input keys: {list(inputs.keys())}")
 
-        while time.time() - start_time < 30.0:
-            loop_start = time.time()
+                with torch.inference_mode():
+                    action = self.vla.predict_action(
+                        **inputs,
+                        nnorm_key=self.unnorm_key,
+                        do_sample=False,
+                    )
+                self.get_logger().info(f"OpenVLA action: {action}")
 
-            obs_msg = get_observation()
-            if obs_msg is None:
-                continue
-
-            # OpenVLA takes a single image
-            pil_image = self._ros_img_to_pil(obs_msg.center_image)
-
-            # Run inference
-            inputs = self.processor(prompt, pil_image).to(self.device, dtype=torch.bfloat16)
-            self.get_logger().info(f"unnorm_key={self.unnorm_key}, inputs keys={list(inputs.keys())}")
-
-            with torch.inference_mode():
-                action = self.vla.predict_action(
-                    input_ids=inputs["input_ids"],
-                    unnorm_key=self.unnorm_key,
-                    do_sample=False,
+                # Apply scaling factor (OpenVLA outputs are small deltas)
+                scale = 1.0  # Tune this for your setup
+                twist = Twist(
+                    linear=Vector3(
+                        x=float(action[0] * scale),
+                        y=float(action[1] * scale),
+                        z=float(action[2] * scale),
+                    ),
+                    angular=Vector3(
+                        x=float(action[3] * scale),
+                        y=float(action[4] * scale),
+                        z=float(action[5] * scale),
+                    ),
                 )
-            # action is a numpy array of 7 values
+                motion_update = self._make_velocity_command(twist)
+                move_robot(motion_update=motion_update)
+                send_feedback("openvla inference in progress...")
 
-            self.get_logger().info(f"OpenVLA action: {action}")
-
-            # Apply scaling factor (OpenVLA outputs are small deltas)
-            scale = 1.0  # Tune this for your setup
-            twist = Twist(
-                linear=Vector3(
-                    x=float(action[0] * scale),
-                    y=float(action[1] * scale),
-                    z=float(action[2] * scale),
-                ),
-                angular=Vector3(
-                    x=float(action[3] * scale),
-                    y=float(action[4] * scale),
-                    z=float(action[5] * scale),
-                ),
-            )
-            motion_update = self._make_velocity_command(twist)
-            move_robot(motion_update=motion_update)
-            send_feedback("openvla inference in progress...")
-
-            # OpenVLA is slower (~1-3 Hz), adjust sleep accordingly
-            elapsed = time.time() - loop_start
-            time.sleep(max(0, 0.5 - elapsed))
-
-        self.get_logger().info("RunOpenVLA.insert_cable() exiting...")
+                # OpenVLA is slower (~1-3 Hz), adjust sleep accordingly
+                elapsed = time.time() - loop_start
+                time.sleep(max(0, 0.5 - elapsed))
+        
+        except Exception as e:
+            import traceback
+            self.get_logger().error(f"EXCEPTION in insert_cable: {e}")
+            self.get_logger().error(traceback.format_exc())
+            self.get_logger().info("RunOpenVLA.insert_cable() exiting...")
         return True
 
     def _make_velocity_command(self, twist: Twist, frame_id: str = "base_link"):
