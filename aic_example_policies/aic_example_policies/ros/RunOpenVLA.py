@@ -77,7 +77,7 @@ class RunOpenVLA(Policy):
 
             with torch.inference_mode():
                 action = self.vla.predict_action(
-                    **inputs,
+                    input_ids=inputs["input_ids"],
                     unnorm_key=self.unnorm_key,
                     do_sample=False,
                 )
