@@ -34,7 +34,6 @@ class RunOpenVLA(Policy):
         ).to(self.device)
 
         self.get_logger().info(f"OpenVLA loaded on {self.device}")
-        self.task_instruction = "insert the cable into the port"
 
         # Set this to your fine-tuned dataset key for un-normalization,
         # or None to get raw normalized actions
@@ -47,6 +46,41 @@ class RunOpenVLA(Policy):
         )
         return Image.fromarray(img_np)
 
+    def _build_task_prompt(self, task: Task) -> str:
+        """Build a task-specific natural language instruction from the Task message.
+
+        Uses plug_type, plug_name, port_name, and target_module_name to create
+        a prompt tailored to each trial:
+          - Trials 1 & 2: SFP module insertion into an SFP port on a NIC card
+          - Trial 3: SC plug insertion into an SC port on the task board
+        """
+        # Normalize names for readability (e.g. "sfp_module" -> "SFP module")
+        plug_display = task.plug_name.replace("_", " ")
+        port_display = task.port_name.replace("_", " ")
+        module_display = task.target_module_name.replace("_", " ")
+
+        if task.plug_type == "sfp":
+            # Trials 1 & 2: SFP module into SFP port on NIC card
+            instruction = (
+                f"insert the grasped {plug_display} into the "
+                f"{port_display} on the {module_display}"
+            )
+        elif task.plug_type == "sc":
+            # Trial 3: SC plug into SC port on task board
+            instruction = (
+                f"insert the grasped {plug_display} into the "
+                f"{port_display} on the task board"
+            )
+        else:
+            # Fallback for any unknown plug type
+            instruction = (
+                f"insert the grasped {plug_display} into the "
+                f"{port_display} on the {module_display}"
+            )
+
+        self.get_logger().info(f"Task-specific instruction: {instruction}")
+        return instruction
+
     def insert_cable(
         self,
         task: Task,
@@ -57,7 +91,11 @@ class RunOpenVLA(Policy):
     ):
         self.get_logger().info(f"RunOpenVLA.insert_cable() enter. Task: {task}")
         try:
-            prompt = f"In: What action should the robot take to {self.task_instruction}?\nOut:"
+            # Build a task-specific prompt from the Task message fields
+            task_instruction = self._build_task_prompt(task)
+            prompt = f"In: What action should the robot take to {task_instruction}?\nOut:"
+            self.get_logger().info(f"Prompt: {prompt}")
+
             start_time = time.time()
             while time.time() - start_time < 30.0:
                 loop_start = time.time()
@@ -96,12 +134,12 @@ class RunOpenVLA(Policy):
                 )
                 motion_update = self._make_velocity_command(twist)
                 move_robot(motion_update=motion_update)
-                send_feedback("openvla inference in progress...")
+                send_feedback(f"openvla inference ({task.plug_type} insertion)...")
 
                 # OpenVLA is slower (~1-3 Hz), adjust sleep accordingly
                 elapsed = time.time() - loop_start
                 time.sleep(max(0, 0.5 - elapsed))
-        
+
         except Exception as e:
             import traceback
             self.get_logger().error(f"EXCEPTION in insert_cable: {e}")
