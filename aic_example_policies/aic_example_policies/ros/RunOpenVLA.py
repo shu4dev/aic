@@ -38,7 +38,7 @@ class RunOpenVLA(Policy):
 
         # Set this to your fine-tuned dataset key for un-normalization,
         # or None to get raw normalized actions
-        self.unnorm_key = None  # e.g., "bridge_orig" for BridgeV2
+        self.unnorm_key = "berkeley_autolab_ur5"  # e.g., "bridge_orig" for BridgeV2
 
     def _ros_img_to_pil(self, raw_img) -> Image.Image:
         """Convert ROS Image to PIL Image."""
