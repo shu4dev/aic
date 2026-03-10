@@ -46,6 +46,40 @@ class RunOpenVLA(Policy):
         )
         return Image.fromarray(img_np)
 
+    def _concat_multi_view(self, obs_msg: Observation) -> Image.Image:
+        """Concatenate left, center, and right camera images side-by-side.
+
+        The three views are placed horizontally as [left | center | right],
+        then resized back to the original single-image dimensions so the
+        model's vision encoder receives the expected input resolution.
+        """
+        left = self._ros_img_to_pil(obs_msg.left_image)
+        center = self._ros_img_to_pil(obs_msg.center_image)
+        right = self._ros_img_to_pil(obs_msg.right_image)
+
+        # Use center image dimensions as the reference size
+        w, h = center.size
+
+        # Resize left and right to match center dimensions (in case they differ)
+        left = left.resize((w, h), Image.LANCZOS)
+        right = right.resize((w, h), Image.LANCZOS)
+
+        # Concatenate side-by-side: [left | center | right]
+        concat = Image.new("RGB", (w * 3, h))
+        concat.paste(left, (0, 0))
+        concat.paste(center, (w, 0))
+        concat.paste(right, (w * 2, 0))
+
+        # Resize back to original single-image dimensions so the vision
+        # encoder gets the resolution it expects (e.g. 224x224 after
+        # processor transforms). This squeezes 3 views into 1 frame.
+        concat = concat.resize((w, h), Image.LANCZOS)
+
+        self.get_logger().info(
+            f"Multi-view concat: 3x({w}x{h}) -> ({w}x{h})"
+        )
+        return concat
+
     def _build_task_prompt(self, task: Task) -> str:
         """Build a task-specific natural language instruction from the Task message.
 
@@ -105,7 +139,7 @@ class RunOpenVLA(Policy):
                     self.get_logger().warn("No observation received")
                     continue
 
-                pil_image = self._ros_img_to_pil(obs_msg.center_image)
+                pil_image = self._concat_multi_view(obs_msg)
                 self.get_logger().info(f"Image size: {pil_image.size}, unnorm_key: {self.unnorm_key}")
 
                 inputs = self.processor(prompt, pil_image).to(self.device, dtype=torch.bfloat16)
