@@ -62,8 +62,8 @@ class RunOpenVLA(Policy):
         if task.plug_type == "sfp":
             # Trials 1 & 2: SFP module into SFP port on NIC card
             instruction = (
-                f"insert the grasped {plug_display} into the "
-                f"{port_display} on the {module_display}"
+                f"insert the grasped {plug_display} into the right port"
+                #f"{port_display} on the {module_display}"
             )
         elif task.plug_type == "sc":
             # Trial 3: SC plug into SC port on task board
