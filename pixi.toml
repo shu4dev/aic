@@ -53,5 +53,5 @@ transformers = ">=4.31.0"           # relaxed from ==4.40.1; original Octo needs
 scripts = ["pixi_env_setup.sh"]
 
 [tasks]
-install-jax-cuda = "python -m pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
-install-octo     = { cmd = "python -m pip install 'octo @ git+https://github.com/octo-models/octo.git'", depends-on = ["install-jax-cuda"] }
+install-jax-cuda = "pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html --break-system-packages"
+install-octo     = { cmd = "pip install 'octo @ git+https://github.com/octo-models/octo.git' --break-system-packages", depends-on = ["install-jax-cuda"] }
