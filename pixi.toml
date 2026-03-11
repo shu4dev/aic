@@ -50,3 +50,6 @@ tokenizers = "==0.19.1"
 
 [activation]
 scripts = ["pixi_env_setup.sh"]
+
+[tasks]
+install-octo = "pip install 'octo @ git+https://github.com/emb-ai/octo-pytorch.git@pytorch'"
