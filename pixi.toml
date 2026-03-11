@@ -43,13 +43,18 @@ lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros"
 mujoco = "==3.5.0"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
-octo = { git = "https://github.com/emb-ai/octo-pytorch.git", branch = "pytorch" }
-transformers = "==4.40.1"
-timm = "==0.9.10"
-tokenizers = "==0.19.1"
+octo = { git = "https://github.com/octo-models/octo.git", branch = "main" }
+flax = ">=0.7.4"
+optax = ">=0.1.7"
+distrax = ">=0.1.4"
+transformers = ">=4.31.0"           # relaxed from ==4.40.1; original Octo needs >=4.31
 
 [activation]
 scripts = ["pixi_env_setup.sh"]
 
 [tasks]
-install-octo = "pip install 'octo @ git+https://github.com/emb-ai/octo-pytorch.git@pytorch'"
+# Install JAX with CUDA 12 support separately because the special pip index
+# cannot be expressed inside pixi's pypi-dependencies block.
+install-jax-cpu  = "pip install 'jax==0.4.20'"
+install-jax-cuda = "pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+install-octo     = "pip install 'octo @ git+https://github.com/octo-models/octo.git'"
