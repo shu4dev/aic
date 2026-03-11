@@ -43,7 +43,7 @@ lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros"
 mujoco = "==3.5.0"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
-octo = { git = "https://github.com/octo-models/octo.git" }
+octo = { git = "https://github.com/emb-ai/octo-pytorch.git", branch = "pytorch" }
 transformers = "==4.40.1"
 timm = "==0.9.10"
 tokenizers = "==0.19.1"
