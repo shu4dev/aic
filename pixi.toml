@@ -53,8 +53,5 @@ transformers = ">=4.31.0"           # relaxed from ==4.40.1; original Octo needs
 scripts = ["pixi_env_setup.sh"]
 
 [tasks]
-# Install JAX with CUDA 12 support separately because the special pip index
-# cannot be expressed inside pixi's pypi-dependencies block.
-install-jax-cpu  = "pip install 'jax==0.4.20'"
-install-jax-cuda = "pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
-install-octo     = "pip install 'octo @ git+https://github.com/octo-models/octo.git'"
+install-jax-cuda = "python -m pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+install-octo     = { cmd = "python -m pip install 'octo @ git+https://github.com/octo-models/octo.git'", depends-on = ["install-jax-cuda"] }
