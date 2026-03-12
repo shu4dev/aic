@@ -43,15 +43,10 @@ lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros"
 mujoco = "==3.5.0"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
-octo = { git = "https://github.com/octo-models/octo.git", branch = "main" }
-flax = ">=0.7.4"
-optax = ">=0.1.7"
-distrax = ">=0.1.4"
-transformers = ">=4.31.0"           # relaxed from ==4.40.1; original Octo needs >=4.31
+octo = { git = "https://github.com/octo-models/octo.git" }
+transformers = "==4.40.1"
+timm = "==0.9.10"
+tokenizers = "==0.19.1"
 
 [activation]
 scripts = ["pixi_env_setup.sh"]
-
-[tasks]
-install-jax-cuda = "pip install 'jax[cuda12_pip]==0.4.20' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html --break-system-packages"
-install-octo     = { cmd = "pip install 'octo @ git+https://github.com/octo-models/octo.git' --break-system-packages", depends-on = ["install-jax-cuda"] }
