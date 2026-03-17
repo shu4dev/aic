@@ -81,6 +81,7 @@ docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
 
 banner "Creating distrobox container (skipped if already exists)..."
 distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval || true
+distrobox enter -r aic_eval -- bash -c
 
 # ---------------------------------------------------------------------------
 # Warmup run — boots the full engine once so subsequent runs start fast,
