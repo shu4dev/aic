@@ -14,19 +14,14 @@ POLICY="aic_example_policies.ros.CheatCode"
 ENGINE_PID=""
 
 # ---------------------------------------------------------------------------
-# Cleanup — kills all AIC processes
+# Cleanup — kills engine process group on exit, Ctrl+C, or error
 # ---------------------------------------------------------------------------
 cleanup() {
     echo ""
-    echo "[$(date +%T)] Cleaning up AIC processes..."
-    pkill -f "entrypoint.sh"  || true
-    pkill -f "aic_gz_bringup" || true
-    pkill -f "aic_engine"     || true
-    pkill -f "aic_adapter"    || true
-    pkill -f "rmw_zenohd"     || true
-    pkill -f "aic_model"      || true
+    echo "[$(date +%T)] Cleaning up..."
     if [ -n "$ENGINE_PID" ]; then
-        kill "$ENGINE_PID" 2>/dev/null || true
+        kill -- -$(ps -o pgid= -p "$ENGINE_PID" | tr -d ' ') 2>/dev/null || true
+        wait "$ENGINE_PID" 2>/dev/null || true
     fi
     echo "[$(date +%T)] Cleanup done."
 }
@@ -81,28 +76,24 @@ docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
 
 banner "Creating distrobox container (skipped if already exists)..."
 distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval || true
-distrobox enter -r aic_eval -- bash -c
 
 # ---------------------------------------------------------------------------
-# Warmup run — boots the full engine once so subsequent runs start fast,
-# then shuts everything down cleanly before the official runs begin.
+# Warmup run — boots the full engine once then shuts down cleanly
+# so subsequent runs start fast.
 # ---------------------------------------------------------------------------
-banner "Warming up container (running entrypoint, then shutting down)..."
+banner "Warming up container..."
 distrobox enter -r aic_eval -- bash -c \
     "/entrypoint.sh ground_truth:=true start_aic_engine:=true" \
     >/dev/null 2>&1 &
-WARMUP_PID=$!
+ENGINE_PID=$!
 
-echo "[$(date +%T)] Warmup PID: $WARMUP_PID — waiting ${ENGINE_WAIT_SECS}s..."
+echo "[$(date +%T)] Warmup PID: $ENGINE_PID — waiting ${ENGINE_WAIT_SECS}s..."
 sleep "$ENGINE_WAIT_SECS"
 
 echo "[$(date +%T)] Shutting down warmup..."
-pkill -f "entrypoint.sh"  || true
-pkill -f "aic_gz_bringup" || true
-pkill -f "aic_engine"     || true
-pkill -f "aic_adapter"    || true
-pkill -f "rmw_zenohd"     || true
-wait "$WARMUP_PID" || true
+kill -- -$(ps -o pgid= -p "$ENGINE_PID" | tr -d ' ') 2>/dev/null || true
+wait "$ENGINE_PID" || true
+ENGINE_PID=""
 
 echo "[$(date +%T)] Warmup complete. Sleeping 10s before official runs..."
 sleep 10
@@ -150,11 +141,7 @@ for i in $(seq 1 "$NUM_RUNS"); do
     echo "[$(date +%T)] Policy exited — $RUN_STATUS"
 
     echo "[$(date +%T)] Shutting down engine..."
-    pkill -f "entrypoint.sh"  || true
-    pkill -f "aic_gz_bringup" || true
-    pkill -f "aic_engine"     || true
-    pkill -f "aic_adapter"    || true
-    pkill -f "rmw_zenohd"     || true
+    kill -- -$(ps -o pgid= -p "$ENGINE_PID" | tr -d ' ') 2>/dev/null || true
     wait "$ENGINE_PID" || true
     ENGINE_PID=""
 
