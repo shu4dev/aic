@@ -120,6 +120,8 @@ for i in $(seq 1 "$NUM_RUNS"); do
     # ------------------------------------------------------------------
     echo "[$(date +%T)] Starting eval container + engine in background..."
     export DBX_CONTAINER_MANAGER=docker
+    docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
+    distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
     distrobox enter -r aic_eval -- bash -c \
         "export AIC_RESULTS_DIR='$RUN_DIR' && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
