@@ -1,44 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# run_cheatcode_10x.sh
-#
-# Automates the standard two-terminal workflow for 10 runs of CheatCode:
-#
-#   [Terminal 1 equivalent - background]
-#     distrobox enter -r aic_eval -- bash -c "
-#       export AIC_RESULTS_DIR=<run_dir> &&
-#       /entrypoint.sh ground_truth:=true start_aic_engine:=true"
-#
-#   [Terminal 2 equivalent - foreground, after engine is ready]
-#     cd ~/ws_aic/src/aic
-#     pixi run ros2 run aic_model aic_model \
-#       --ros-args -p use_sim_time:=true \
-#       -p policy:=aic_example_policies.ros.CheatCode
-#
-# Each run stores results in its own folder:
-#   ~/aic_results/run_01_YYYYMMDD_HHMMSS/
-#   ~/aic_results/run_02_YYYYMMDD_HHMMSS/
-#   ...
-#
-# PREREQUISITES:
-#   - Docker + Distrobox installed and the aic_eval image already pulled:
-#       docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-#       distrobox create -r --nvidia \
-#         -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
-#   - Pixi installed and workspace set up at ~/ws_aic/src/aic
-#
-# USAGE:
-#   chmod +x run_cheatcode_10x.sh
-#   ./run_cheatcode_10x.sh
-#
-# OPTIONAL OVERRIDES (set as env vars before running):
-#   AIC_WORKSPACE      path to aic repo        (default: ~/ws_aic/src/aic)
-#   AIC_BASE_RESULTS   base results folder     (default: ~/aic_results)
-#   NUM_RUNS           number of runs          (default: 10)
-#   ENGINE_WAIT_SECS   seconds to wait for the (default: 20)
-#                      engine to be ready before
-#                      launching the policy
-# =============================================================================
+# run_cheatcode_10x.sh — Runs CheatCode policy 10 times, one folder per run.
 
 set -euo pipefail
 
@@ -50,21 +11,41 @@ BASE_RESULTS="${AIC_BASE_RESULTS:-$HOME/ws_aic/src/aic/aic_results}"
 NUM_RUNS="${NUM_RUNS:-10}"
 ENGINE_WAIT_SECS="${ENGINE_WAIT_SECS:-20}"
 POLICY="aic_example_policies.ros.CheatCode"
+ENGINE_PID=""
+
+# ---------------------------------------------------------------------------
+# Cleanup — kills all AIC processes
+# ---------------------------------------------------------------------------
+cleanup() {
+    echo ""
+    echo "[$(date +%T)] Cleaning up AIC processes..."
+    pkill -f "entrypoint.sh"  || true
+    pkill -f "aic_gz_bringup" || true
+    pkill -f "aic_engine"     || true
+    pkill -f "aic_adapter"    || true
+    pkill -f "rmw_zenohd"     || true
+    pkill -f "aic_model"      || true
+    if [ -n "$ENGINE_PID" ]; then
+        kill "$ENGINE_PID" 2>/dev/null || true
+    fi
+    echo "[$(date +%T)] Cleanup done."
+}
+
+trap cleanup EXIT SIGINT SIGTERM
 
 # ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 if [ ! -d "$WORKSPACE" ]; then
     echo "[ERROR] Workspace not found: $WORKSPACE"
-    echo "        Set AIC_WORKSPACE or clone the repo to ~/ws_aic/src/aic"
     exit 1
 fi
 if ! command -v pixi &>/dev/null; then
-    echo "[ERROR] 'pixi' not found in PATH. Please install Pixi first."
+    echo "[ERROR] 'pixi' not found in PATH."
     exit 1
 fi
 if ! command -v distrobox &>/dev/null; then
-    echo "[ERROR] 'distrobox' not found in PATH. Please install Distrobox first."
+    echo "[ERROR] 'distrobox' not found in PATH."
     exit 1
 fi
 
@@ -75,7 +56,7 @@ mkdir -p "$BASE_RESULTS"
 # ---------------------------------------------------------------------------
 SUMMARY="$BASE_RESULTS/summary.txt"
 {
-    echo "CheatCode 10-Run Summary"
+    echo "CheatCode $NUM_RUNS-Run Summary"
     echo "Policy : $POLICY"
     echo "Started: $(date)"
     echo "------------------------------------------------------------"
@@ -83,9 +64,6 @@ SUMMARY="$BASE_RESULTS/summary.txt"
     echo "------------------------------------------------------------"
 } > "$SUMMARY"
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 banner() {
     echo ""
     echo "================================================"
@@ -94,18 +72,46 @@ banner() {
 }
 
 # ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+export DBX_CONTAINER_MANAGER=docker
+
+banner "Pulling aic_eval image..."
+docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
+
+banner "Creating distrobox container (skipped if already exists)..."
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval || true
+
+# ---------------------------------------------------------------------------
+# Warmup run — boots the full engine once so subsequent runs start fast,
+# then shuts everything down cleanly before the official runs begin.
+# ---------------------------------------------------------------------------
+banner "Warming up container (running entrypoint, then shutting down)..."
+distrobox enter -r aic_eval -- bash -c \
+    "/entrypoint.sh ground_truth:=true start_aic_engine:=true" \
+    >/dev/null 2>&1 &
+WARMUP_PID=$!
+
+echo "[$(date +%T)] Warmup PID: $WARMUP_PID — waiting ${ENGINE_WAIT_SECS}s..."
+sleep "$ENGINE_WAIT_SECS"
+
+echo "[$(date +%T)] Shutting down warmup..."
+pkill -f "entrypoint.sh"  || true
+pkill -f "aic_gz_bringup" || true
+pkill -f "aic_engine"     || true
+pkill -f "aic_adapter"    || true
+pkill -f "rmw_zenohd"     || true
+wait "$WARMUP_PID" || true
+
+echo "[$(date +%T)] Warmup complete. Sleeping 10s before official runs..."
+sleep 10
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace   : $WORKSPACE"
 echo "Results base: $BASE_RESULTS"
-
-echo "[$(date +%T)] Starting eval container + engine in background..."
-export DBX_CONTAINER_MANAGER=docker
-docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
-distrobox enter -r aic_eval -- bash -c "echo 'Container ready'"
-echo "Container ready. Starting runs..."
 
 for i in $(seq 1 "$NUM_RUNS"); do
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -119,32 +125,17 @@ for i in $(seq 1 "$NUM_RUNS"); do
     banner "Run $i / $NUM_RUNS"
     echo "Results dir : $RUN_DIR"
 
-    # ------------------------------------------------------------------
-    # TERMINAL 1 equivalent:
-    # Launch the eval container + aic_engine in the background.
-    # AIC_RESULTS_DIR is passed into the container so the engine writes
-    # results into this run's dedicated folder.
-    # ------------------------------------------------------------------
+    # Terminal 1 equivalent
     distrobox enter -r aic_eval -- bash -c \
         "export AIC_RESULTS_DIR='$RUN_DIR' && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
     ENGINE_PID=$!
     echo "[$(date +%T)] Engine PID: $ENGINE_PID"
 
-    # ------------------------------------------------------------------
-    # Wait for the engine to be ready.
-    # The engine prints "No node with name 'aic_model' found. Retrying..."
-    # while waiting — give it a fixed head start before connecting.
-    # Tune ENGINE_WAIT_SECS if your machine is slower/faster.
-    # ------------------------------------------------------------------
     echo "[$(date +%T)] Waiting ${ENGINE_WAIT_SECS}s for engine to initialize..."
     sleep "$ENGINE_WAIT_SECS"
 
-    # ------------------------------------------------------------------
-    # TERMINAL 2 equivalent:
-    # Run the policy. It connects to the engine, completes all trials,
-    # then exits on its own.
-    # ------------------------------------------------------------------
+    # Terminal 2 equivalent
     echo "[$(date +%T)] Launching policy..."
     RUN_STATUS="SUCCESS"
     (
@@ -157,23 +148,22 @@ for i in $(seq 1 "$NUM_RUNS"); do
 
     echo "[$(date +%T)] Policy exited — $RUN_STATUS"
 
-    # ------------------------------------------------------------------
-    # Wait for the engine background process to finish writing results
-    # and shut down cleanly before starting the next run.
-    # ------------------------------------------------------------------
-    echo "[$(date +%T)] Waiting for engine to shut down..."
-    wait "$ENGINE_PID" || true   # engine may exit non-zero; that is OK
+    echo "[$(date +%T)] Shutting down engine..."
+    pkill -f "entrypoint.sh"  || true
+    pkill -f "aic_gz_bringup" || true
+    pkill -f "aic_engine"     || true
+    pkill -f "aic_adapter"    || true
+    pkill -f "rmw_zenohd"     || true
+    wait "$ENGINE_PID" || true
+    ENGINE_PID=""
 
     echo "[$(date +%T)] Run $i complete."
     echo "  Engine log : $ENGINE_LOG"
     echo "  Policy log : $POLICY_LOG"
     echo "  Results    : $RUN_DIR"
 
-    # Append to summary table
-    printf "%-5s  %-36s  %s\n" \
-        "$i" "${RUN_LABEL}_${TIMESTAMP}" "$RUN_STATUS" >> "$SUMMARY"
+    printf "%-5s  %-36s  %s\n" "$i" "${RUN_LABEL}_${TIMESTAMP}" "$RUN_STATUS" >> "$SUMMARY"
 
-    # Short pause so Gazebo/ROS state fully tears down before next run
     if [ "$i" -lt "$NUM_RUNS" ]; then
         echo "[$(date +%T)] Sleeping 10s before next run..."
         sleep 10
