@@ -100,6 +100,13 @@ banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace   : $WORKSPACE"
 echo "Results base: $BASE_RESULTS"
 
+echo "[$(date +%T)] Starting eval container + engine in background..."
+export DBX_CONTAINER_MANAGER=docker
+docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
+distrobox enter -r aic_eval -- bash -c "echo 'Container ready'"
+echo "Container ready. Starting runs..."
+
 for i in $(seq 1 "$NUM_RUNS"); do
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     RUN_LABEL="run_$(printf '%02d' "$i")"
@@ -118,10 +125,6 @@ for i in $(seq 1 "$NUM_RUNS"); do
     # AIC_RESULTS_DIR is passed into the container so the engine writes
     # results into this run's dedicated folder.
     # ------------------------------------------------------------------
-    echo "[$(date +%T)] Starting eval container + engine in background..."
-    export DBX_CONTAINER_MANAGER=docker
-    docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-    distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
     distrobox enter -r aic_eval -- bash -c \
         "export AIC_RESULTS_DIR='$RUN_DIR' && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
