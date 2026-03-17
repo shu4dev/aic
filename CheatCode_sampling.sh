@@ -46,7 +46,7 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 WORKSPACE="${AIC_WORKSPACE:-$HOME/ws_aic/src/aic}"
-BASE_RESULTS="${AIC_BASE_RESULTS:-$HOME/aic_results}"
+BASE_RESULTS="${AIC_BASE_RESULTS:-$HOME/ws_aic/src/aic/wsaic_results}"
 NUM_RUNS="${NUM_RUNS:-10}"
 ENGINE_WAIT_SECS="${ENGINE_WAIT_SECS:-20}"
 POLICY="aic_example_policies.ros.CheatCode"
