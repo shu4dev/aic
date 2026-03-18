@@ -202,8 +202,7 @@ for i in $(seq 1 "$NUM_RUNS"); do
     banner "Run $i / $NUM_RUNS"
     echo "Results dir : $RUN_DIR"
 
-    # NOTE: Added 'setsid' here to run the engine in its own process group
-    setsid distrobox enter -r "$CONTAINER_NAME" -- bash -c \
+    distrobox enter -r "$CONTAINER_NAME" -- bash -c \
         "export AIC_RESULTS_DIR='$RUN_DIR' && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
     ENGINE_PID=$!
