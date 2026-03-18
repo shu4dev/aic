@@ -28,6 +28,11 @@ ts() { echo "[$(date +%T)]"; }
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*[mGKHF]//g'; }
 
+# ---------------------------------------------------------------------------
+# Kill all simulation processes inside the container via docker exec.
+# This frees Zenoh port bindings and ROS 2 shared memory without needing
+# a full container restart, which would break the distrobox session state.
+# ---------------------------------------------------------------------------
 kill_container_procs() {
     echo "$(ts) Killing simulation processes inside container..."
     docker exec "$CONTAINER_NAME" \
@@ -36,6 +41,12 @@ kill_container_procs() {
     sleep 2
 }
 
+# ---------------------------------------------------------------------------
+# Full container restart — only used ONCE before the main loop.
+# docker restart breaks the distrobox session layer if called between runs,
+# causing the next distrobox enter to hang. Between runs, kill_container_procs
+# is sufficient since killing the processes frees all shared state.
+# ---------------------------------------------------------------------------
 reset_container() {
     echo "$(ts) Restarting container for clean state..."
     docker restart "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -66,6 +77,19 @@ cleanup() {
 
 trap cleanup EXIT SIGINT SIGTERM
 
+# ---------------------------------------------------------------------------
+# wait_for_engine_ready <log_file>
+#
+# Stage 1: Poll Zenoh port with nc — comes up first, fastest signal.
+#          A port conflict from a prior run is caught here at ~1s.
+# Stage 2: Poll engine log for the exact string aic_engine prints when
+#          waiting for aic_model. Uses BRE grep (no -E) so \| works as OR.
+#          Log is ANSI-stripped before matching to avoid color code interference.
+#
+# Why no -E: grep -qE with \| treats \| as a literal backslash-pipe in ERE
+# mode (it is NOT an alternation operator in ERE). This caused every run to
+# time out at Stage 2 even though the log contained the ready signal.
+# ---------------------------------------------------------------------------
 wait_for_engine_ready() {
     local log_file="$1"
     local timeout="$ENGINE_READY_TIMEOUT"
@@ -132,9 +156,25 @@ distrobox create -r --nvidia \
     -i ghcr.io/intrinsic-dev/aic/aic_eval:latest \
     "$CONTAINER_NAME" || true
 
-banner "Pre-run cleanup..."
+# ---------------------------------------------------------------------------
+# Pre-loop: guarantee a clean container state before any runs begin.
+# This handles leftover state from any previously interrupted session.
+# docker restart is ONLY done here — not between runs (see teardown comment).
+# ---------------------------------------------------------------------------
+banner "Pre-run cleanup (clearing any leftover state)..."
 kill_container_procs
 reset_container
+
+# ---------------------------------------------------------------------------
+# Warmup distrobox entry: the very first distrobox enter is significantly
+# slower because distrobox initialises user namespaces, mounts home dirs,
+# and syncs rc files. Doing this once here as a blocking no-op ensures all
+# subsequent entries in the main loop start at normal speed.
+# ---------------------------------------------------------------------------
+banner "Warming up distrobox entry (first entry is always slow)..."
+distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Container ready'" \
+    >/dev/null 2>&1
+echo "$(ts) Distrobox entry ready."
 
 banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace     : $WORKSPACE"
@@ -193,9 +233,15 @@ for i in $(seq 1 "$NUM_RUNS"); do
         "$i" "${RUN_LABEL}_${TIMESTAMP}" "$RUN_STATUS" "${ENGINE_READY_SECS}s" \
         >> "$SUMMARY"
 
+    # -------------------------------------------------------------------------
+    # Between runs: kill all simulation processes inside the container to free
+    # Zenoh port bindings and ROS 2 shared memory. Do NOT call reset_container
+    # (docker restart) here — it breaks distrobox's session layer and causes
+    # the next distrobox enter to hang indefinitely.
+    # -------------------------------------------------------------------------
     if [ "$i" -lt "$NUM_RUNS" ]; then
-        banner "Resetting container before run $((i + 1))..."
-        reset_container
+        banner "Cleaning up before run $((i + 1))..."
+        kill_container_procs
         sleep "$BETWEEN_RUN_WAIT"
     fi
 done
