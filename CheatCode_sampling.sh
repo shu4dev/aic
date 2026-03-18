@@ -8,14 +8,25 @@ CONTAINER_NAME="${AIC_CONTAINER:-aic_eval}"
 POLICY="${AIC_POLICY:-aic_example_policies.ros.CheatCode}"
 
 ENGINE_READY_TIMEOUT="${ENGINE_READY_TIMEOUT:-120}"
+RUN_COMPLETE_TIMEOUT="${RUN_COMPLETE_TIMEOUT:-600}"
 CONTAINER_RESTART_WAIT="${CONTAINER_RESTART_WAIT:-8}"
 BETWEEN_RUN_WAIT="${BETWEEN_RUN_WAIT:-5}"
 ZENOH_PORT="${ZENOH_PORT:-7447}"
 
+# Display forwarding — captured from the launching terminal (e.g. DCV session).
+# DCV typically sets DISPLAY=:1; a plain desktop is usually :0.
+# Override via env var if needed: DISPLAY=:2 ./CheatCode_sampling.sh
+DISPLAY="${DISPLAY:-:0}"
+XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+
 # BRE alternation (\|) — do NOT add -E flag to grep or this pattern breaks
 ENGINE_READY_PATTERN="No node with name 'aic_model' found\|aic_engine initialized\|Waiting for aic_model\|Starting AIC Engine Run"
 
+# Matches the line ros2 launch prints when aic_engine node exits cleanly
+RUN_COMPLETE_PATTERN="process has finished cleanly\|AIC Engine Run.*complete\|aic_engine.*shutting down"
+
 ENGINE_PID=""
+POLICY_PID=""
 
 banner() {
     echo ""
@@ -54,9 +65,12 @@ reset_container() {
 }
 
 # ---------------------------------------------------------------------------
-# teardown_run: stops engine and container processes after each run.
+# teardown_run: stops policy, engine, and container processes after each run.
 #
-# Why no `wait` after kill:
+# Policy is killed first (lighter weight), then the engine wrapper PGID,
+# then container procs are purged via docker exec.
+#
+# Why no `wait` after engine kill:
 #   We send SIGKILL to the entire process group, so the process is immediately
 #   dead. Calling `wait` on an already-dead process can still block in bash if
 #   the PID has already been reaped by a prior wait or by the shell's async
@@ -71,6 +85,15 @@ reset_container() {
 #   prevents this from blocking the loop.
 # ---------------------------------------------------------------------------
 teardown_run() {
+    # Kill policy first (lighter weight — just a ros2 run process)
+    if [ -n "$POLICY_PID" ]; then
+        echo "$(ts) Stopping policy (host PID: $POLICY_PID)..."
+        kill "$POLICY_PID" 2>/dev/null || true
+        wait "$POLICY_PID" 2>/dev/null || true
+        POLICY_PID=""
+    fi
+
+    # Kill engine wrapper process group
     if [ -n "$ENGINE_PID" ]; then
         echo "$(ts) Stopping engine (host wrapper PID: $ENGINE_PID)..."
         local pgid
@@ -80,6 +103,7 @@ teardown_run() {
         fi
         ENGINE_PID=""
     fi
+
     # Let the container runtime settle before issuing docker exec
     sleep 3
     kill_container_procs
@@ -135,6 +159,35 @@ wait_for_engine_ready() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# wait_for_run_complete <log_file>
+#
+# Polls the engine log until aic_engine node reports it has finished cleanly.
+# Neither the engine wrapper nor the policy self-terminate — the log is the
+# only reliable signal that all trials are done.
+#
+# Returns 0 on success, 1 on timeout.
+# ---------------------------------------------------------------------------
+wait_for_run_complete() {
+    local log_file="$1"
+    local timeout="$RUN_COMPLETE_TIMEOUT"
+    local elapsed=0
+
+    echo "$(ts) Waiting for aic_engine to finish all trials (timeout: ${timeout}s)..."
+    until strip_ansi < "$log_file" 2>/dev/null | grep -q "$RUN_COMPLETE_PATTERN"; do
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "$(ts) [ERROR] Run timed out after ${elapsed}s — aic_engine never signalled completion."
+            echo "$(ts) Last 10 lines of engine log:"
+            strip_ansi < "$log_file" 2>/dev/null | tail -10 || true
+            return 1
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    echo "$(ts) aic_engine finished all trials after ${elapsed}s."
+    return 0
+}
+
 if [ ! -d "$WORKSPACE" ]; then
     echo "[ERROR] Workspace not found: $WORKSPACE"
     exit 1
@@ -187,6 +240,7 @@ banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace     : $WORKSPACE"
 echo "Results base  : $BASE_RESULTS"
 echo "Ready timeout : ${ENGINE_READY_TIMEOUT}s per run"
+echo "Run timeout   : ${RUN_COMPLETE_TIMEOUT}s per run"
 
 for i in $(seq 1 "$NUM_RUNS"); do
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -202,8 +256,15 @@ for i in $(seq 1 "$NUM_RUNS"); do
     banner "Run $i / $NUM_RUNS"
     echo "Results dir : $RUN_DIR"
 
+    # Start engine in the background — it never self-terminates.
+    # DISPLAY and XAUTHORITY are forwarded explicitly so Gazebo and RViz
+    # can open windows in the DCV (or local desktop) session even though
+    # this process is launched as a background job with redirected output.
     distrobox enter -r "$CONTAINER_NAME" -- bash -c \
-        "export AIC_RESULTS_DIR='$RUN_DIR' && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
+        "export DISPLAY='${DISPLAY}' \
+         && export XAUTHORITY='${XAUTHORITY}' \
+         && export AIC_RESULTS_DIR='$RUN_DIR' \
+         && /entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
     ENGINE_PID=$!
     echo "$(ts) Engine started (host wrapper PID: $ENGINE_PID)"
@@ -215,6 +276,8 @@ for i in $(seq 1 "$NUM_RUNS"); do
     else
         ENGINE_READY_SECS=$((SECONDS - START_WAIT))
 
+        # Start policy in the background — ros2 run never self-terminates
+        # after a lifecycle shutdown, so it must be killed explicitly below
         echo "$(ts) Launching policy..."
         (
             cd "$WORKSPACE"
@@ -222,9 +285,25 @@ for i in $(seq 1 "$NUM_RUNS"); do
                 --ros-args \
                 -p use_sim_time:=true \
                 -p policy:="$POLICY"
-        ) >"$POLICY_LOG" 2>&1 || RUN_STATUS="POLICY_FAILED"
+        ) >"$POLICY_LOG" 2>&1 &
+        POLICY_PID=$!
+        echo "$(ts) Policy started (host PID: $POLICY_PID)"
 
-        echo "$(ts) Policy exited — $RUN_STATUS"
+        # Block here until aic_engine prints its completion line in the log.
+        # This is the only reliable end-of-run signal — neither the engine
+        # wrapper nor the policy process will exit on their own.
+        if ! wait_for_run_complete "$ENGINE_LOG"; then
+            RUN_STATUS="RUN_TIMEOUT"
+        fi
+
+        echo "$(ts) Run complete ($RUN_STATUS) — stopping policy..."
+
+        # Kill policy explicitly now that the run is done
+        if [ -n "$POLICY_PID" ]; then
+            kill "$POLICY_PID" 2>/dev/null || true
+            wait "$POLICY_PID" 2>/dev/null || true
+            POLICY_PID=""
+        fi
     fi
 
     teardown_run
