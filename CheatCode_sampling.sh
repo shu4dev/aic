@@ -8,14 +8,17 @@ CONTAINER_NAME="${AIC_CONTAINER:-aic_eval}"
 POLICY="${AIC_POLICY:-aic_example_policies.ros.CheatCode}"
 
 ENGINE_READY_TIMEOUT="${ENGINE_READY_TIMEOUT:-120}"
+ENGINE_DONE_TIMEOUT="${ENGINE_DONE_TIMEOUT:-900}"
 BETWEEN_RUN_WAIT="${BETWEEN_RUN_WAIT:-5}"
 CONTAINER_RESTART_WAIT="${CONTAINER_RESTART_WAIT:-8}"
 ZENOH_PORT="${ZENOH_PORT:-7447}"
 
 # BRE alternation (\|) — do NOT add -E flag to grep or this pattern breaks
 ENGINE_READY_PATTERN="No node with name 'aic_model' found\|aic_engine initialized\|Waiting for aic_model\|Starting AIC Engine Run"
+ENGINE_DONE_PATTERN="All Trials Processed\|process has finished cleanly"
 
 ENGINE_PID=""
+POLICY_PID=""
 
 banner() {
     echo ""
@@ -43,16 +46,27 @@ reset_container() {
     echo "$(ts) Container restarted."
 }
 
+# ---------------------------------------------------------------------------
+# teardown_run
+#
+# Kills the policy process first (pixi run often hangs after on_shutdown
+# because ros2 run waits indefinitely for the middleware to clean up).
+# Then kills the engine docker exec wrapper.
+# Then kills any remaining processes inside the container.
+# ---------------------------------------------------------------------------
 teardown_run() {
+    if [ -n "$POLICY_PID" ]; then
+        echo "$(ts) Stopping policy (PID: $POLICY_PID)..."
+        kill -- "$POLICY_PID" 2>/dev/null || true
+        POLICY_PID=""
+    fi
+
     if [ -n "$ENGINE_PID" ]; then
         echo "$(ts) Stopping engine (PID: $ENGINE_PID)..."
-        local pgid
-        pgid=$(ps -o pgid= -p "$ENGINE_PID" 2>/dev/null | tr -d ' ') || true
-        if [ -n "$pgid" ]; then
-            kill -- -"$pgid" 2>/dev/null || true
-        fi
+        kill -- "$ENGINE_PID" 2>/dev/null || true
         ENGINE_PID=""
     fi
+
     sleep 3
     kill_container_procs
 }
@@ -66,6 +80,11 @@ cleanup() {
 
 trap cleanup EXIT SIGINT SIGTERM
 
+# ---------------------------------------------------------------------------
+# wait_for_engine_ready <log_file>
+# Stage 1: Zenoh port up (fastest signal).
+# Stage 2: Engine log shows it is waiting for aic_model (authoritative).
+# ---------------------------------------------------------------------------
 wait_for_engine_ready() {
     local log_file="$1"
     local timeout="$ENGINE_READY_TIMEOUT"
@@ -77,8 +96,7 @@ wait_for_engine_ready() {
             echo "$(ts) [ERROR] Timed out waiting for Zenoh port after ${elapsed}s."
             return 1
         fi
-        sleep 1
-        elapsed=$((elapsed + 1))
+        sleep 1; elapsed=$((elapsed + 1))
     done
     echo "$(ts) [Stage 1/2] Zenoh router up after ${elapsed}s."
 
@@ -90,10 +108,34 @@ wait_for_engine_ready() {
             strip_ansi < "$log_file" 2>/dev/null | tail -10 || true
             return 1
         fi
-        sleep 1
-        elapsed=$((elapsed + 1))
+        sleep 1; elapsed=$((elapsed + 1))
     done
     echo "$(ts) [Stage 2/2] Engine ready after ${elapsed}s total."
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# wait_for_engine_done <log_file>
+#
+# Polls the engine log for the completion signal emitted after all trials
+# finish. Using the log as the done signal (rather than waiting on the
+# docker exec PID) because the ROS 2 launch system keeps gz/rviz2 alive
+# after aic_engine exits, so the docker exec process never naturally exits.
+# ---------------------------------------------------------------------------
+wait_for_engine_done() {
+    local log_file="$1"
+    local timeout="$ENGINE_DONE_TIMEOUT"
+    local elapsed=0
+
+    echo "$(ts) Waiting for all trials to complete..."
+    until strip_ansi < "$log_file" 2>/dev/null | grep -q "$ENGINE_DONE_PATTERN"; do
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "$(ts) [ERROR] Engine did not complete trials within ${timeout}s."
+            return 1
+        fi
+        sleep 2; elapsed=$((elapsed + 2))
+    done
+    echo "$(ts) All trials completed after ${elapsed}s."
     return 0
 }
 
@@ -124,11 +166,6 @@ SUMMARY="$BASE_RESULTS/summary.txt"
     echo "------------------------------------------------------------"
 } > "$SUMMARY"
 
-# ---------------------------------------------------------------------------
-# One-time setup: pull image and create distrobox (needed for pixi/workspace
-# integration — distrobox is still used for the warmup and environment setup,
-# but NOT for the per-run engine launch, which uses docker exec directly).
-# ---------------------------------------------------------------------------
 banner "Pulling aic_eval image..."
 docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
 
@@ -137,12 +174,10 @@ distrobox create -r --nvidia \
     -i ghcr.io/intrinsic-dev/aic/aic_eval:latest \
     "$CONTAINER_NAME" || true
 
-# Pre-loop clean state — docker restart only happens once here.
 banner "Pre-run cleanup (clearing any leftover state)..."
 kill_container_procs
 reset_container
 
-# Warmup distrobox entry (only needed for the distrobox session itself).
 banner "Warming up distrobox entry..."
 distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Container ready'" \
     >/dev/null 2>&1
@@ -152,6 +187,7 @@ banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace     : $WORKSPACE"
 echo "Results base  : $BASE_RESULTS"
 echo "Ready timeout : ${ENGINE_READY_TIMEOUT}s per run"
+echo "Done timeout  : ${ENGINE_DONE_TIMEOUT}s per run"
 
 for i in $(seq 1 "$NUM_RUNS"); do
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -168,16 +204,15 @@ for i in $(seq 1 "$NUM_RUNS"); do
     echo "Results dir : $RUN_DIR"
 
     # -------------------------------------------------------------------------
-    # Launch engine via docker exec instead of distrobox enter.
-    #
-    # distrobox enter attempts TTY/session setup even with -- bash -c, which
-    # blocks when run in the background (&) after the first run has dirtied
-    # the distrobox session layer. docker exec has no such session overhead —
-    # it connects directly to the running container, making it reliable for
-    # repeated background non-interactive use.
+    # Launch engine via docker exec with DISPLAY forwarded so Gazebo/RViz
+    # windows appear on the host desktop.
+    # docker exec is used instead of distrobox enter because distrobox enter
+    # attempts TTY/session setup that blocks when used as a background job
+    # after the first run dirtied the session state.
     # -------------------------------------------------------------------------
     docker exec \
         -e AIC_RESULTS_DIR="$RUN_DIR" \
+        -e DISPLAY="${DISPLAY:-:0}" \
         "$CONTAINER_NAME" \
         bash -c "/entrypoint.sh ground_truth:=true start_aic_engine:=true" \
         >"$ENGINE_LOG" 2>&1 &
@@ -191,6 +226,15 @@ for i in $(seq 1 "$NUM_RUNS"); do
     else
         ENGINE_READY_SECS=$((SECONDS - START_WAIT))
 
+        # ---------------------------------------------------------------------
+        # Launch policy in the BACKGROUND.
+        #
+        # pixi run / ros2 run hangs after the node calls on_shutdown because
+        # the ROS 2 middleware (Zenoh) holds open connections that keep the
+        # executor alive. Running in the background lets us kill it explicitly
+        # once the engine signals all trials are done, rather than waiting
+        # forever for pixi run to exit on its own.
+        # ---------------------------------------------------------------------
         echo "$(ts) Launching policy..."
         (
             cd "$WORKSPACE"
@@ -198,9 +242,20 @@ for i in $(seq 1 "$NUM_RUNS"); do
                 --ros-args \
                 -p use_sim_time:=true \
                 -p policy:="$POLICY"
-        ) >"$POLICY_LOG" 2>&1 || RUN_STATUS="POLICY_FAILED"
+        ) >"$POLICY_LOG" 2>&1 &
+        POLICY_PID=$!
+        echo "$(ts) Policy started (PID: $POLICY_PID)"
 
-        echo "$(ts) Policy exited — $RUN_STATUS"
+        # Wait for engine to finish all trials, then kill the policy
+        if wait_for_engine_done "$ENGINE_LOG"; then
+            echo "$(ts) Engine done — stopping policy..."
+            sleep 2
+            kill -- "$POLICY_PID" 2>/dev/null || true
+            wait "$POLICY_PID" 2>/dev/null || true
+            POLICY_PID=""
+        else
+            RUN_STATUS="ENGINE_TIMEOUT"
+        fi
     fi
 
     teardown_run
