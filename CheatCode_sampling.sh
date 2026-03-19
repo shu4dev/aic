@@ -9,7 +9,8 @@ POLICY="${AIC_POLICY:-aic_example_policies.ros.CheatCode}"
 
 ENGINE_READY_TIMEOUT="${ENGINE_READY_TIMEOUT:-300}"
 RUN_COMPLETE_TIMEOUT="${RUN_COMPLETE_TIMEOUT:-600}"
-CONTAINER_RESTART_WAIT="${CONTAINER_RESTART_WAIT:-8}"
+# Increased from 8 to 20 to absorb cold-start Docker/distrobox init on fresh boot
+CONTAINER_RESTART_WAIT="${CONTAINER_RESTART_WAIT:-20}"
 BETWEEN_RUN_WAIT="${BETWEEN_RUN_WAIT:-5}"
 ZENOH_PORT="${ZENOH_PORT:-7447}"
 
@@ -22,8 +23,15 @@ XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 # BRE alternation (\|) — do NOT add -E flag to grep or this pattern breaks
 ENGINE_READY_PATTERN="No node with name 'aic_model' found\|aic_engine initialized\|Waiting for aic_model\|Starting AIC Engine Run"
 
-# Matches the line ros2 launch prints when aic_engine node exits cleanly
-RUN_COMPLETE_PATTERN="process has finished cleanly\|AIC Engine Run.*complete\|aic_engine.*shutting down"
+# ---------------------------------------------------------------------------
+# IMPORTANT: Pattern MUST match only [aic_engine-N] specifically.
+#
+# Other nodes (create-5, spawner-10) also emit "process has finished cleanly"
+# within seconds of startup — long before aic_engine finishes all trials.
+# A broad pattern causes wait_for_run_complete to return 0 immediately,
+# the policy gets killed before executing, and result files are empty.
+# ---------------------------------------------------------------------------
+RUN_COMPLETE_PATTERN="\[aic_engine-[0-9]*\]: process has finished cleanly"
 
 ENGINE_PID=""
 POLICY_PID=""
@@ -70,6 +78,15 @@ reset_container() {
 # Policy is killed first (lighter weight), then the engine wrapper PGID,
 # then container procs are purged via docker exec.
 #
+# PGID self-kill guard:
+#   `kill -- -"$pgid"` sends SIGTERM to the entire process group. Because
+#   bash runs without job control (no `set -m`), background jobs inherit the
+#   script's own PGID. If the engine PGID matches the script's own PGID,
+#   we would kill ourselves and fire the SIGTERM trap mid-run, causing
+#   teardown_run to be called twice and leaving ENGINE_PID un-cleared.
+#   The guard compares engine PGID against the script's own PGID ($$ PGID)
+#   and falls back to killing just the engine PID directly when they match.
+#
 # Why no `wait` after engine kill:
 #   We send SIGKILL to the entire process group, so the process is immediately
 #   dead. Calling `wait` on an already-dead process can still block in bash if
@@ -93,13 +110,19 @@ teardown_run() {
         POLICY_PID=""
     fi
 
-    # Kill engine wrapper process group
+    # Kill engine wrapper — guard against killing our own process group
     if [ -n "$ENGINE_PID" ]; then
         echo "$(ts) Stopping engine (host wrapper PID: $ENGINE_PID)..."
-        local pgid
+        local pgid script_pgid
         pgid=$(ps -o pgid= -p "$ENGINE_PID" 2>/dev/null | tr -d ' ') || true
-        if [ -n "$pgid" ]; then
+        script_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ') || true
+        if [ -n "$pgid" ] && [ "$pgid" != "$script_pgid" ]; then
+            # Safe: engine has its own process group — kill the whole group
             kill -- -"$pgid" 2>/dev/null || true
+        elif [ -n "$ENGINE_PID" ]; then
+            # PGID matches script or couldn't be determined — kill only the
+            # engine wrapper PID directly to avoid self-termination
+            kill "$ENGINE_PID" 2>/dev/null || true
         fi
         ENGINE_PID=""
     fi
@@ -162,7 +185,11 @@ wait_for_engine_ready() {
 # ---------------------------------------------------------------------------
 # wait_for_run_complete <log_file>
 #
-# Polls the engine log until aic_engine node reports it has finished cleanly.
+# Polls the engine log until aic_engine node specifically reports it has
+# finished cleanly. Pattern is scoped to [aic_engine-N] to avoid false
+# positives from other nodes (create-5, spawner-10) that also emit
+# "process has finished cleanly" within seconds of startup.
+#
 # Neither the engine wrapper nor the policy self-terminate — the log is the
 # only reliable signal that all trials are done.
 #
@@ -229,12 +256,25 @@ banner "Pre-run cleanup (clearing any leftover state)..."
 kill_container_procs
 reset_container
 
-# Warmup: the very first distrobox enter is slow (namespace init, home mounts).
-# Absorb that cost here so run 1's engine startup isn't penalized.
-banner "Warming up distrobox entry (first entry is always slow)..."
-distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Container ready'" \
+# ---------------------------------------------------------------------------
+# Warmup: absorb the cold-start cost of the first distrobox entry.
+#
+# Two passes are used intentionally:
+#   Pass 1 — triggers namespace init, home mount setup, and group resolution
+#             that distrobox defers until the first `enter` after a restart.
+#   Pass 2 — confirms the session layer is fully settled and subsequent
+#             `distrobox enter` calls will be fast (~1-2s overhead).
+# Without this, run 1 on a fresh system boot can fail ENGINE_FAILED because
+# the container init overhead pushes the first entrypoint.sh call past the
+# Zenoh port timeout window.
+# ---------------------------------------------------------------------------
+banner "Warming up distrobox entry (two passes for cold-start safety)..."
+distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Warmup pass 1 complete'" \
     >/dev/null 2>&1
-echo "$(ts) Distrobox entry ready."
+sleep 5
+distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Warmup pass 2 complete'" \
+    >/dev/null 2>&1
+echo "$(ts) Distrobox entry fully warmed up."
 
 banner "Starting $NUM_RUNS runs of $POLICY"
 echo "Workspace     : $WORKSPACE"
@@ -277,7 +317,7 @@ for i in $(seq 1 "$NUM_RUNS"); do
         ENGINE_READY_SECS=$((SECONDS - START_WAIT))
 
         # Start policy in the background — ros2 run never self-terminates
-        # after a lifecycle shutdown, so it must be killed explicitly below
+        # after a lifecycle shutdown, so it must be killed explicitly below.
         echo "$(ts) Launching policy..."
         (
             cd "$WORKSPACE"
@@ -289,9 +329,9 @@ for i in $(seq 1 "$NUM_RUNS"); do
         POLICY_PID=$!
         echo "$(ts) Policy started (host PID: $POLICY_PID)"
 
-        # Block here until aic_engine prints its completion line in the log.
-        # This is the only reliable end-of-run signal — neither the engine
-        # wrapper nor the policy process will exit on their own.
+        # Block here until aic_engine specifically prints its completion line.
+        # Pattern is scoped to [aic_engine-N] — see RUN_COMPLETE_PATTERN note
+        # at the top of this script for why a broad pattern causes empty results.
         if ! wait_for_run_complete "$ENGINE_LOG"; then
             RUN_STATUS="RUN_TIMEOUT"
         fi
