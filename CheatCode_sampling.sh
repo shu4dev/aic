@@ -375,6 +375,10 @@ for i in $(seq 1 "$NUM_RUNS"); do
     echo "$(ts) Scene params for this run:"
     for p in "${SCENE_PARAMS[@]}"; do echo "         $p"; done
 
+    banner "Resetting container for clean world state..."
+    kill_container_procs
+    reset_container
+    
     # FIX: Remove stale world SDF to prevent double task board spawn
     echo "$(ts) Clearing stale world SDF from previous run..."
     distrobox enter -r "$CONTAINER_NAME" -- bash -c "rm -f /tmp/aic.sdf"
