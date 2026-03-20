@@ -1,29 +1,6 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# CheatCode_sampling.sh  —  Diverse scene sampling for CheatCode policy
-#
-# Each run gets a freshly randomised scene:
-#   • Task-board pose  (x / y / z / yaw)
-#   • SFP mounts on rail 0 & 1          (present / translation)
-#   • SC mounts on rail 0 & 1           (present / translation)
-#   • NIC-card mounts on slots 0–2      (present / translation)
-#   • SC standalone port 0              (present / translation)
-#   • Cable type                        (sfp_sc_cable / sfp_sc_cable_reversed)
-#
-# Invariants that are always enforced:
-#   • At least one SFP mount is present  (the SFP end of the cable must dock)
-#   • At least one SC-side target is present  (SC mount, NIC slot, or SC port)
-#   • spawn_cable=true  attach_cable_to_gripper=true  ground_truth=true
-#
-# Set RANDOM_SCENE=false to disable randomisation and fall back to the
-# hardcoded nominal scene (useful for deterministic debugging).
-#
-# Scene params for every run are saved to  <run_dir>/scene_params.txt
-# A machine-readable seed line is prepended for exact reproducibility.
-# ==============================================================================
 set -euo pipefail
 
-# ─── Tuneable defaults ────────────────────────────────────────────────────────
 WORKSPACE="${AIC_WORKSPACE:-$HOME/ws_aic/src/aic}"
 BASE_RESULTS="${AIC_BASE_RESULTS:-$HOME/ws_aic/src/aic/aic_results}"
 NUM_RUNS="${NUM_RUNS:-10}"
@@ -39,11 +16,8 @@ ZENOH_PORT="${ZENOH_PORT:-7447}"
 DISPLAY="${DISPLAY:-:0}"
 XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-# Set to "false" to run every episode with the hardcoded nominal scene.
 RANDOM_SCENE="${RANDOM_SCENE:-true}"
 
-# ─── Nominal (non-random) scene  ─────────────────────────────────────────────
-# Used when RANDOM_SCENE=false, or as the fallback template.
 NOMINAL_SCENE=(
     "spawn_task_board:=true"
     "task_board_x:=0.300"
@@ -73,23 +47,12 @@ NOMINAL_SCENE=(
     "attach_cable_to_gripper:=true"
 )
 
-# ─── Pattern constants (unchanged from original) ──────────────────────────────
 ENGINE_READY_PATTERN="No node with name 'aic_model' found\|aic_engine initialized\|Waiting for aic_model\|Starting AIC Engine Run"
 RUN_COMPLETE_PATTERN="\[aic_engine-[0-9]*\]: process has finished cleanly"
 
 ENGINE_PID=""
 POLICY_PID=""
 
-# ==============================================================================
-# Scene-randomisation helpers
-# All float arithmetic uses only bash integer math — no bc / python required.
-# Floats are represented internally as thousandths (milli-units):
-#   rand_float_3d  200  450   →  value in [0.200 , 0.450]  (thousandths 200..450)
-#   rand_float_3d -120   80   →  value in [-0.120, 0.080]
-# ==============================================================================
-
-# rand_float_3d LO HI
-#   LO, HI in thousandths; prints a decimal string with 3 dp.
 rand_float_3d() {
     local lo=$1 hi=$2
     local range=$(( hi - lo + 1 ))
@@ -102,77 +65,60 @@ rand_float_3d() {
     fi
 }
 
-# rand_bool  →  "true" or "false" with equal probability
 rand_bool() {
     [ $(( RANDOM % 2 )) -eq 0 ] && echo "true" || echo "false"
 }
 
-# rand_choice  item1 item2 ...  →  one item chosen uniformly at random
 rand_choice() {
     local n=$#
     local idx=$(( RANDOM % n + 1 ))
     eval echo "\${$idx}"
 }
 
-# ------------------------------------------------------------------------------
-# generate_scene_params
-#   Populates the global array SCENE_PARAMS with randomised launch arguments.
-#   Enforces validity constraints (at least one SFP mount, at least one SC
-#   target) so the episode is always solvable by the CheatCode policy.
-# ------------------------------------------------------------------------------
 generate_scene_params() {
-    # ── Task-board pose ──────────────────────────────────────────────────────
     local tb_x tb_y tb_z tb_yaw
-    tb_x=$(rand_float_3d  200  450)   # [0.200, 0.450] m
-    tb_y=$(rand_float_3d -200   50)   # [-0.200, 0.050] m
-    tb_z=$(rand_float_3d 1100 1350)   # [1.100, 1.350] m  (table height)
-    tb_yaw=$(rand_float_3d   0 1571)  # [0.000, 1.571] rad  (0 – 90°)
+    tb_x=$(rand_float_3d  200  450)
+    tb_y=$(rand_float_3d -200   50)
+    tb_z=$(rand_float_3d 1100 1350)
+    tb_yaw=$(rand_float_3d   0 1571)
 
-    # ── Cable type ───────────────────────────────────────────────────────────
     local cable_type
     cable_type=$(rand_choice sfp_sc_cable sfp_sc_cable_reversed)
 
-    # ── SFP mounts (rail 0 & 1) ──────────────────────────────────────────────
     local sfp0_present sfp0_trans sfp1_present sfp1_trans
     sfp0_present=$(rand_bool)
-    sfp0_trans=$(rand_float_3d -120 80)   # [-0.120, 0.080] m
+    sfp0_trans=$(rand_float_3d -120 80)
     sfp1_present=$(rand_bool)
     sfp1_trans=$(rand_float_3d -120 80)
-    # Constraint: at least one SFP mount must exist.
     if [ "$sfp0_present" = "false" ] && [ "$sfp1_present" = "false" ]; then
         sfp0_present="true"
         sfp0_trans=$(rand_float_3d -120 80)
     fi
 
-    # ── SC mounts (rail 0 & 1) ───────────────────────────────────────────────
     local sc0_present sc0_trans sc1_present sc1_trans
     sc0_present=$(rand_bool)
     sc0_trans=$(rand_float_3d -120 80)
     sc1_present=$(rand_bool)
     sc1_trans=$(rand_float_3d -120 80)
 
-    # ── NIC-card mounts (slots 0, 1, 2) ─────────────────────────────────────
     local nic0_present nic0_trans nic1_present nic1_trans nic2_present nic2_trans
     nic0_present=$(rand_bool)
-    nic0_trans=$(rand_float_3d -80 80)    # NIC slots have tighter rail range
+    nic0_trans=$(rand_float_3d -80 80)
     nic1_present=$(rand_bool)
     nic1_trans=$(rand_float_3d -80 80)
     nic2_present=$(rand_bool)
     nic2_trans=$(rand_float_3d -80 80)
 
-    # ── SC standalone port ───────────────────────────────────────────────────
     local sc_port0_present sc_port0_trans
     sc_port0_present=$(rand_bool)
     sc_port0_trans=$(rand_float_3d -80 60)
 
-    # Constraint: at least one SC-side target must be present.
     if [ "$sc0_present"      = "false" ] && \
        [ "$sc1_present"      = "false" ] && \
        [ "$nic0_present"     = "false" ] && \
        [ "$nic1_present"     = "false" ] && \
        [ "$nic2_present"     = "false" ] && \
        [ "$sc_port0_present" = "false" ]; then
-        # Pick randomly between an SC mount on rail 0 or sc_port_0.
         if [ $(( RANDOM % 2 )) -eq 0 ]; then
             sc0_present="true"
             sc0_trans=$(rand_float_3d -120 80)
@@ -182,7 +128,6 @@ generate_scene_params() {
         fi
     fi
 
-    # ── Build the array ───────────────────────────────────────────────────────
     SCENE_PARAMS=(
         "spawn_task_board:=true"
         "task_board_x:=${tb_x}"
@@ -213,17 +158,13 @@ generate_scene_params() {
     )
 }
 
-# ------------------------------------------------------------------------------
-# save_scene_metadata  RUN_DIR  SEED  PARAMS_ARRAY...
-#   Writes scene_params.txt into the run directory.
-# ------------------------------------------------------------------------------
 save_scene_metadata() {
     local run_dir="$1"
     local seed="$2"
     shift 2
     local meta_file="$run_dir/scene_params.txt"
     {
-        echo "# SEED=${seed}   (set RANDOM=${seed} before calling generate_scene_params to reproduce)"
+        echo "# SEED=${seed}"
         echo "# Generated: $(date)"
         echo ""
         for param in "$@"; do
@@ -233,9 +174,6 @@ save_scene_metadata() {
     echo "$(ts) Scene params → $meta_file"
 }
 
-# ==============================================================================
-# Utility functions (unchanged from original)
-# ==============================================================================
 banner() {
     echo ""
     echo "================================================"
@@ -347,9 +285,7 @@ wait_for_run_complete() {
     return 0
 }
 
-# ==============================================================================
 # Pre-flight checks
-# ==============================================================================
 if [ ! -d "$WORKSPACE" ]; then
     echo "[ERROR] Workspace not found: $WORKSPACE"
     exit 1
@@ -366,9 +302,6 @@ done
 mkdir -p "$BASE_RESULTS"
 export DBX_CONTAINER_MANAGER=docker
 
-# ==============================================================================
-# Summary file header
-# ==============================================================================
 SUMMARY="$BASE_RESULTS/summary.txt"
 {
     echo "CheatCode ${NUM_RUNS}-Run Summary (Random Scene Sampling)"
@@ -382,9 +315,6 @@ SUMMARY="$BASE_RESULTS/summary.txt"
     echo "--------------------------------------------------------------------"
 } > "$SUMMARY"
 
-# ==============================================================================
-# Container setup
-# ==============================================================================
 banner "Pulling aic_eval image..."
 docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
 
@@ -393,7 +323,7 @@ distrobox create -r --nvidia \
     -i ghcr.io/intrinsic-dev/aic/aic_eval:latest \
     "$CONTAINER_NAME" || true
 
-banner "Pre-run cleanup (clearing any leftover state)..."
+banner "Pre-run cleanup..."
 kill_container_procs
 reset_container
 
@@ -405,9 +335,6 @@ distrobox enter -r "$CONTAINER_NAME" -- bash -c "echo 'Warmup pass 2 complete'" 
     >/dev/null 2>&1
 echo "$(ts) Distrobox entry fully warmed up."
 
-# ==============================================================================
-# Main run loop
-# ==============================================================================
 banner "Starting $NUM_RUNS runs of $POLICY  [RANDOM_SCENE=${RANDOM_SCENE}]"
 echo "Workspace     : $WORKSPACE"
 echo "Results base  : $BASE_RESULTS"
@@ -428,22 +355,18 @@ for i in $(seq 1 "$NUM_RUNS"); do
     banner "Run $i / $NUM_RUNS"
     echo "Results dir : $RUN_DIR"
 
-    # ── Scene selection ───────────────────────────────────────────────────────
-    # Seed $RANDOM with a combination of nanoseconds + run index for
-    # reproducibility: the exact seed is written to scene_params.txt.
     RUN_SEED=$(( $(date +%N) % 32767 + i * 1337 ))
     RANDOM=$RUN_SEED
 
     SCENE_PARAMS=()
     if [ "${RANDOM_SCENE}" = "true" ]; then
-        generate_scene_params          # populates SCENE_PARAMS array
+        generate_scene_params
         save_scene_metadata "$RUN_DIR" "$RUN_SEED" "${SCENE_PARAMS[@]}"
     else
         SCENE_PARAMS=("${NOMINAL_SCENE[@]}")
         save_scene_metadata "$RUN_DIR" "nominal" "${SCENE_PARAMS[@]}"
     fi
 
-    # Extract cable_type for summary logging
     CABLE_TYPE="unknown"
     for p in "${SCENE_PARAMS[@]}"; do
         [[ "$p" == cable_type:=* ]] && CABLE_TYPE="${p#cable_type:=}" && break
@@ -452,9 +375,10 @@ for i in $(seq 1 "$NUM_RUNS"); do
     echo "$(ts) Scene params for this run:"
     for p in "${SCENE_PARAMS[@]}"; do echo "         $p"; done
 
-    # ── Launch engine + simulation ────────────────────────────────────────────
-    # Build a single-line param string to pass through the distrobox bash -c
-    # string (all values are simple alphanumeric/dot/dash — safe to expand).
+    # FIX: Remove stale world SDF to prevent double task board spawn
+    echo "$(ts) Clearing stale world SDF from previous run..."
+    distrobox enter -r "$CONTAINER_NAME" -- bash -c "rm -f /tmp/aic.sdf"
+
     SCENE_PARAM_STR="${SCENE_PARAMS[*]}"
 
     distrobox enter -r "$CONTAINER_NAME" -- bash -c \
