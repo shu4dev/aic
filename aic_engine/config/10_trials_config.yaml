@@ -6,11 +6,6 @@ scoring:
     - topic:
         name: "/joint_states"
         type: "sensor_msgs/msg/JointState"
-    - topic:
-    # Current state of the end-effector/gripper (Hand-E)
-        name: "/gripper_state"
-        type: "sensor_msgs/msg/JointState"
-
     # ── Vision (required for VLA training) ────────────────────────────────────
     - topic:
     # Rectified image from the left wrist camera
