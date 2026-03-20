@@ -414,7 +414,7 @@ trials:
               yaw: 0.0
           sc_mount_rail_0:
             entity_present: True
-            entity_name: "sc_mount_0"
+            entity_name: "sc_mount_0a"
             entity_pose:
               translation: -0.050
               roll: 0.0
@@ -594,7 +594,7 @@ trials:
               yaw: 0.0
           sc_mount_rail_1:
             entity_present: True
-            entity_name: "sc_mount_1"
+            entity_name: "sc_mount_1a"
             entity_pose:
               translation: 0.080
               roll: 0.0
@@ -978,7 +978,7 @@ trials:
               yaw: 0.0
           sc_mount_rail_0:
             entity_present: True
-            entity_name: "sc_mount_0"
+            entity_name: "sc_mount_0a"
             entity_pose:
               translation: 0.040
               roll: 0.0
@@ -1002,7 +1002,7 @@ trials:
               yaw: 0.0
           sc_mount_rail_1:
             entity_present: True
-            entity_name: "sc_mount_1"
+            entity_name: "sc_mount_1a"
             entity_pose:
               translation: -0.090
               roll: 0.0
