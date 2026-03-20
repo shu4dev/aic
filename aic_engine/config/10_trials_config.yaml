@@ -57,13 +57,6 @@ scoring:
         name: "/aic_controller/controller_state"
         type: "aic_control_interfaces/msg/ControllerState"
 
-    # ── Language instruction source ────────────────────────────────────────────
-    - topic:
-    # InsertCable action goal — carries Task.msg with cable_type, plug_type,
-    # port_name, target_module_name. Used to auto-generate language labels.
-        name: "/insert_cable/_action/send_goal"
-        type: "aic_task_interfaces/action/InsertCable"
-
     # ── Transforms ────────────────────────────────────────────────────────────
     - topic:
     # TF that contains the robot and gripper poses
