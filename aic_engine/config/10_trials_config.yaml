@@ -79,18 +79,18 @@ scoring:
 
 task_board_limits:
   nic_rail:
-    min_translation: -0.0215  # Minimum translation from center along the rail (in meters)
-    max_translation: 0.0234   # Maximum translation from center along the rail (in meters)
+    min_translation: -0.0215
+    max_translation: 0.0234
   sc_rail:
-    min_translation: -0.06  # Minimum translation from center along the rail (in meters)
-    max_translation: 0.055   # Maximum translation from center along the rail (in meters)
+    min_translation: -0.06
+    max_translation: 0.055
   mount_rail:
-    min_translation: -0.09425  # Minimum translation from center along the rail (in meters)
-    max_translation: 0.09425   # Maximum translation from center along the rail (in meters)
-
-trials:
+    min_translation: -0.09425
+    max_translation: 0.09425
  
-  # Trial 1: SFP cable → NIC slot 0 | board yaw ~25° | NIC-heavy scene
+trials:
+  # Trial 1: SFP cable → NIC slot 0 | board yaw ~25°
+  # z: 1.140 (unchanged — at table height)
   trial_1:
     scene:
         task_board:
@@ -174,14 +174,15 @@ trials:
         target_module_name: "nic_card_mount_0"
         time_limit: 180
  
-  # Trial 2: SFP cable → NIC slot 2 | board yaw ~45° | minimal scene
+  # Trial 2: SFP cable → NIC slot 2 | board yaw ~45°
+  # z: 1.200 → 1.160 (was 6cm above table)
   trial_2:
     scene:
         task_board:
           pose:
             x: 0.320
             y: -0.100
-            z: 1.200
+            z: 1.160
             roll: 0.0
             pitch: 0.0
             yaw: 0.785
@@ -252,17 +253,18 @@ trials:
         target_module_name: "nic_card_mount_2"
         time_limit: 180
  
-  # Trial 3: SC-reversed cable → sc_port_1 | board yaw ~60° | SC-heavy scene
+  # Trial 3: SC-reversed cable → sc_port_0 | board yaw ~10°
+  # z: 1.180 → 1.150 (was 4cm above table)
   trial_3:
     scene:
         task_board:
           pose:
             x: 0.250
             y: -0.050
-            z: 1.300
+            z: 1.150
             roll: 0.0
             pitch: 0.0
-            yaw: 1.047
+            yaw: 0.175
           nic_rail_0:
             entity_present: False
           nic_rail_1:
@@ -277,20 +279,20 @@ trials:
             entity_present: True
             entity_name: "sc_mount_0"
             entity_pose:
-              translation: -0.055
+              translation: -0.040
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
           sc_rail_1:
+            entity_present: False
+          lc_mount_rail_0:
             entity_present: True
-            entity_name: "sc_mount_1"
+            entity_name: "lc_mount_0"
             entity_pose:
-              translation: 0.040
+              translation: 0.050
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
-          lc_mount_rail_0:
-            entity_present: False
           sfp_mount_rail_0:
             entity_present: True
             entity_name: "sfp_mount_0"
@@ -303,18 +305,12 @@ trials:
             entity_present: True
             entity_name: "sc_mount_2"
             entity_pose:
-              translation: 0.050
+              translation: 0.040
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
           lc_mount_rail_1:
-            entity_present: True
-            entity_name: "lc_mount_1"
-            entity_pose:
-              translation: -0.020
-              roll: 0.0
-              pitch: 0.0
-              yaw: 0.0
+            entity_present: False
           sfp_mount_rail_1:
             entity_present: False
           sc_mount_rail_1:
@@ -339,10 +335,11 @@ trials:
         plug_name: "sc_tip"
         port_type: "sc"
         port_name: "sc_port_base"
-        target_module_name: "sc_port_1"
+        target_module_name: "sc_port_0"
         time_limit: 180
  
-  # Trial 4: SFP cable → NIC slot 4 | board yaw ~90° | crowded with all rail types
+  # Trial 4: SFP cable → NIC slot 4 | board yaw ~90°
+  # z: 1.140 (unchanged — at table height)
   trial_4:
     scene:
         task_board:
@@ -444,21 +441,28 @@ trials:
         target_module_name: "nic_card_mount_4"
         time_limit: 180
  
-  # Trial 5: SC-reversed cable → sc_port_0 | board yaw ~15° | sparse scene
+  # Trial 5: SC-reversed cable → sc_port_1 | board yaw ~5°
+  # z: 1.220 → 1.170 (was 8cm above table)
   trial_5:
     scene:
         task_board:
           pose:
-            x: 0.170
-            y: 0.030
-            z: 1.110
+            x: 0.300
+            y: 0.020
+            z: 1.170
             roll: 0.0
             pitch: 0.0
-            yaw: 0.262
+            yaw: 0.087
           nic_rail_0:
             entity_present: False
           nic_rail_1:
-            entity_present: False
+            entity_present: True
+            entity_name: "nic_card_1"
+            entity_pose:
+              translation: 0.010
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
           nic_rail_2:
             entity_present: False
           nic_rail_3:
@@ -466,22 +470,28 @@ trials:
           nic_rail_4:
             entity_present: False
           sc_rail_0:
+            entity_present: False
+          sc_rail_1:
             entity_present: True
-            entity_name: "sc_mount_0"
+            entity_name: "sc_mount_1"
             entity_pose:
-              translation: 0.050
+              translation: 0.030
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
-          sc_rail_1:
-            entity_present: False
           lc_mount_rail_0:
-            entity_present: False
+            entity_present: True
+            entity_name: "lc_mount_0"
+            entity_pose:
+              translation: -0.050
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
           sfp_mount_rail_0:
             entity_present: True
             entity_name: "sfp_mount_0"
             entity_pose:
-              translation: -0.090
+              translation: 0.060
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -490,13 +500,7 @@ trials:
           lc_mount_rail_1:
             entity_present: False
           sfp_mount_rail_1:
-            entity_present: True
-            entity_name: "sfp_mount_1"
-            entity_pose:
-              translation: 0.040
-              roll: 0.0
-              pitch: 0.0
-              yaw: 0.0
+            entity_present: False
           sc_mount_rail_1:
             entity_present: False
         cables:
@@ -519,20 +523,21 @@ trials:
         plug_name: "sc_tip"
         port_type: "sc"
         port_name: "sc_port_base"
-        target_module_name: "sc_port_0"
+        target_module_name: "sc_port_1"
         time_limit: 180
  
-  # Trial 6: SFP cable → NIC slot 1 | board yaw ~75° | high table + right-side mounts
+  # Trial 6: SFP cable → NIC slot 1 | board yaw ~35°
+  # z: 1.160 (unchanged — close enough to table)
   trial_6:
     scene:
         task_board:
           pose:
-            x: 0.350
-            y: -0.200
-            z: 1.350
+            x: 0.280
+            y: -0.140
+            z: 1.160
             roll: 0.0
             pitch: 0.0
-            yaw: 1.309
+            yaw: 0.610
           nic_rail_0:
             entity_present: False
           nic_rail_1:
@@ -556,45 +561,39 @@ trials:
           nic_rail_4:
             entity_present: False
           sc_rail_0:
-            entity_present: False
-          sc_rail_1:
             entity_present: True
-            entity_name: "sc_mount_1"
+            entity_name: "sc_mount_0"
             entity_pose:
-              translation: -0.040
+              translation: -0.035
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
+          sc_rail_1:
+            entity_present: False
           lc_mount_rail_0:
             entity_present: False
           sfp_mount_rail_0:
-            entity_present: False
+            entity_present: True
+            entity_name: "sfp_mount_0"
+            entity_pose:
+              translation: 0.050
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
           sc_mount_rail_0:
             entity_present: False
           lc_mount_rail_1:
             entity_present: True
             entity_name: "lc_mount_1"
             entity_pose:
-              translation: 0.060
+              translation: -0.060
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
           sfp_mount_rail_1:
-            entity_present: True
-            entity_name: "sfp_mount_1"
-            entity_pose:
-              translation: -0.070
-              roll: 0.0
-              pitch: 0.0
-              yaw: 0.0
+            entity_present: False
           sc_mount_rail_1:
-            entity_present: True
-            entity_name: "sc_mount_1a"
-            entity_pose:
-              translation: 0.080
-              roll: 0.0
-              pitch: 0.0
-              yaw: 0.0
+            entity_present: False
         cables:
           cable_0:
             pose:
@@ -618,14 +617,15 @@ trials:
         target_module_name: "nic_card_mount_1"
         time_limit: 180
  
-  # Trial 7: SFP cable → NIC slot 3 | board yaw ~30° | low table, board close in
+  # Trial 7: SFP cable → NIC slot 3 | board yaw ~30°
+  # z: 1.100 → 1.120 (was 4cm below table)
   trial_7:
     scene:
         task_board:
           pose:
             x: 0.160
             y: -0.120
-            z: 1.100
+            z: 1.120
             roll: 0.0
             pitch: 0.0
             yaw: 0.524
@@ -714,14 +714,15 @@ trials:
         target_module_name: "nic_card_mount_3"
         time_limit: 180
  
-  # Trial 8: SC-reversed cable → sc_port_1 | board yaw ~0° (straight) | symmetrical scene
+  # Trial 8: SC-reversed cable → sc_port_1 | board yaw ~0°
+  # z: 1.250 → 1.170 (was 11cm above table — biggest outlier)
   trial_8:
     scene:
         task_board:
           pose:
             x: 0.440
             y: -0.050
-            z: 1.250
+            z: 1.170
             roll: 0.0
             pitch: 0.0
             yaw: 0.000
@@ -816,22 +817,23 @@ trials:
         target_module_name: "sc_port_1"
         time_limit: 180
  
-  # Trial 9: SFP cable → NIC slot 0 | board yaw ~55° | both SFP rails active
+  # Trial 9: SFP cable → NIC slot 0 | board yaw ~40°
+  # z: 1.130 (unchanged — close to table)
   trial_9:
     scene:
         task_board:
           pose:
-            x: 0.280
-            y: -0.180
-            z: 1.170
+            x: 0.220
+            y: -0.100
+            z: 1.130
             roll: 0.0
             pitch: 0.0
-            yaw: 0.960
+            yaw: 0.700
           nic_rail_0:
             entity_present: True
             entity_name: "nic_card_0"
             entity_pose:
-              translation: 0.020
+              translation: 0.010
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -841,7 +843,7 @@ trials:
             entity_present: True
             entity_name: "nic_card_2"
             entity_pose:
-              translation: -0.021
+              translation: -0.015
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -850,7 +852,13 @@ trials:
           nic_rail_4:
             entity_present: False
           sc_rail_0:
-            entity_present: False
+            entity_present: True
+            entity_name: "sc_mount_0"
+            entity_pose:
+              translation: 0.045
+              roll: 0.0
+              pitch: 0.0
+              yaw: 0.0
           sc_rail_1:
             entity_present: False
           lc_mount_rail_0:
@@ -859,7 +867,7 @@ trials:
             entity_present: True
             entity_name: "sfp_mount_0"
             entity_pose:
-              translation: -0.094
+              translation: -0.050
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -871,7 +879,7 @@ trials:
             entity_present: True
             entity_name: "sfp_mount_1"
             entity_pose:
-              translation: 0.094
+              translation: 0.040
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -900,17 +908,18 @@ trials:
         target_module_name: "nic_card_mount_0"
         time_limit: 180
  
-  # Trial 10: SC-reversed cable → sc_port_0 | board yaw ~80° | fully loaded scene
+  # Trial 10: SC-reversed cable → sc_port_0 | board yaw ~8°
+  # z: 1.200 → 1.150 (was 6cm above table)
   trial_10:
     scene:
         task_board:
           pose:
-            x: 0.420
-            y: 0.000
-            z: 1.320
+            x: 0.380
+            y: -0.020
+            z: 1.150
             roll: 0.0
             pitch: 0.0
-            yaw: 1.396
+            yaw: 0.140
           nic_rail_0:
             entity_present: True
             entity_name: "nic_card_0"
@@ -943,7 +952,7 @@ trials:
             entity_present: True
             entity_name: "sc_mount_0"
             entity_pose:
-              translation: -0.060
+              translation: -0.050
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -951,7 +960,7 @@ trials:
             entity_present: True
             entity_name: "sc_mount_1"
             entity_pose:
-              translation: 0.055
+              translation: 0.045
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -959,7 +968,7 @@ trials:
             entity_present: True
             entity_name: "lc_mount_0"
             entity_pose:
-              translation: 0.070
+              translation: 0.060
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -967,7 +976,7 @@ trials:
             entity_present: True
             entity_name: "sfp_mount_0"
             entity_pose:
-              translation: -0.080
+              translation: -0.070
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -991,7 +1000,7 @@ trials:
             entity_present: True
             entity_name: "sfp_mount_1"
             entity_pose:
-              translation: 0.060
+              translation: 0.050
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -999,7 +1008,7 @@ trials:
             entity_present: True
             entity_name: "sc_mount_1a"
             entity_pose:
-              translation: -0.090
+              translation: -0.080
               roll: 0.0
               pitch: 0.0
               yaw: 0.0
@@ -1025,7 +1034,7 @@ trials:
         port_name: "sc_port_base"
         target_module_name: "sc_port_0"
         time_limit: 180
-
+ 
 robot:
   home_joint_positions:
     shoulder_pan_joint: -0.1597
