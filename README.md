@@ -1,3 +1,15 @@
+## AWS EC2 DCV Server Note
+```shell
+sudo systemctl start dcvserver
+
+sudo systemctl status dcvserver
+
+sudo dcv create-session my-console-session --type=console --owner ubuntu
+
+sudo passwd ubuntu
+
+scp -r -i your-key.pem ubuntu@<ec2-ip>:/path/to/folder ./local-destination/
+```
 # AI for Industry Challenge Toolkit
 
 [![build](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml)
