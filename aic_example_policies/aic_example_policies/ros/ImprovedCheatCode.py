@@ -234,6 +234,7 @@ class ImprovedCheatCode(Policy):
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         self.get_logger().info(f"ImprovedCheatCode.insert_cable() task: {task}")
+        self.sleep_for(2.0)
         self._task = task
         self._port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
@@ -249,7 +250,7 @@ class ImprovedCheatCode(Policy):
         self._align_and_descend(move_robot, get_observation, send_feedback)
 
         self.get_logger().info("Stabilizing...")
-        self.sleep_for(1.5)
+        self.sleep_for(5.0)
 
         self.get_logger().info("ImprovedCheatCode.insert_cable() exiting...")
         return True
