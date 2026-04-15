@@ -98,6 +98,9 @@ def launch_setup(context, *args, **kwargs):
     model_discovery_timeout_seconds = LaunchConfiguration(
         "model_discovery_timeout_seconds"
     )
+    model_configure_timeout_seconds = LaunchConfiguration(
+        "model_configure_timeout_seconds"
+    )
     post_home_stabilization_seconds = LaunchConfiguration(
         "post_home_stabilization_seconds"
     )
@@ -777,6 +780,13 @@ def generate_launch_description():
                 [FindPackageShare("aic_engine"), "config", "sample_config.yaml"]
             ),
             description="Absolute path to YAML file with the AIC engine configuration.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "model_configure_timeout_seconds",
+            default_value="60",
+            description="Timeout for model configuration checks.",
         )
     )
 

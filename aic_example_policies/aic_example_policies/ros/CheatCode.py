@@ -192,6 +192,7 @@ class CheatCode(Policy):
         send_feedback: SendFeedbackCallback,
     ):
         self.get_logger().info(f"CheatCode.insert_cable() task: {task}")
+        self.sleep_for(2.0)
         self._task = task
 
         port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
