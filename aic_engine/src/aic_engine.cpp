@@ -317,6 +317,9 @@ Engine::Engine(const rclcpp::NodeOptions& options)
   node_->declare_parameter("model_deactivate_timeout_seconds", 60);
   node_->declare_parameter("model_cleanup_timeout_seconds", 60);
   node_->declare_parameter("model_shutdown_timeout_seconds", 60);
+  node_->declare_parameter("post_home_stabilization_seconds", 2.0);
+  node_->declare_parameter("settling_consecutive_readings", 5);
+  node_->declare_parameter("pre_cable_spawn_stabilization_seconds", 1.0);
 
   // Set scoring output directory from AIC_RESULTS_DIR environment variable
   // If not set or empty, default to $HOME/aic_results
@@ -1200,6 +1203,13 @@ bool Engine::ready_simulator(Trial& trial) {
 
   // Spawn the cable.
   RCLCPP_INFO(node_->get_logger(), "Spawning cable.");
+  double pre_cable_stabilization =
+      node_->get_parameter("pre_cable_spawn_stabilization_seconds").as_double();
+  RCLCPP_INFO(node_->get_logger(),
+              "Waiting %.1f seconds for arm to stabilize before cable spawn...",
+              pre_cable_stabilization);
+  node_->get_clock()->sleep_for(
+      rclcpp::Duration::from_seconds(pre_cable_stabilization));
   // Get the current gripper pose, and set the cable pose accordingly.
   std::string warning_msg;
   const std::string gripper_frame =
@@ -1248,7 +1258,7 @@ bool Engine::ready_simulator(Trial& trial) {
   }
 
   // Wait for cable to be spawned. Sleep in sim time to ensure sim has advanced.
-  node_->get_clock()->sleep_for(rclcpp::Duration::from_seconds(0.1));
+  node_->get_clock()->sleep_for(rclcpp::Duration::from_seconds(0.5));
 
   RCLCPP_INFO(node_->get_logger(), "Waiting for robot arm to stabilize.");
   // The end-effector dips when the cable is first attached.
@@ -1256,21 +1266,36 @@ bool Engine::ready_simulator(Trial& trial) {
   std::condition_variable cv;
   std::mutex mtx;
   bool joints_settled = false;
+  int consecutive_settled_count = 0;
+  const int required_consecutive =
+      node_->get_parameter("settling_consecutive_readings").as_int();
   const rclcpp::QoS reliable_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
   auto joint_states_sub =
       node_->create_subscription<sensor_msgs::msg::JointState>(
           "/joint_states", reliable_qos,
-          [this, &joints_settled, &cv,
-           &mtx](const sensor_msgs::msg::JointState::SharedPtr msg) {
+          [this, &joints_settled, &cv, &mtx, &consecutive_settled_count,
+           required_consecutive](
+              const sensor_msgs::msg::JointState::SharedPtr msg) {
             if (msg->velocity.empty()) return;
+            bool all_settled = true;
             for (size_t i = 0; i < msg->velocity.size(); ++i) {
-              if (std::fabs(msg->velocity[i]) > 1e-3) return;
+              if (std::fabs(msg->velocity[i]) > 1e-3) {
+                all_settled = false;
+                break;
+              }
             }
             {
               std::unique_lock<std::mutex> lock(mtx);
-              joints_settled = true;
+              if (all_settled) {
+                consecutive_settled_count++;
+                if (consecutive_settled_count >= required_consecutive) {
+                  joints_settled = true;
+                  cv.notify_one();
+                }
+              } else {
+                consecutive_settled_count = 0;
+              }
             }
-            cv.notify_one();
           });
 
   std::unique_lock<std::mutex> lock(mtx);
@@ -1703,6 +1728,14 @@ bool Engine::home_robot() {
     return false;
   }
   RCLCPP_INFO(node_->get_logger(), "aic_controller activated successfully.");
+
+  double stabilization_time =
+      node_->get_parameter("post_home_stabilization_seconds").as_double();
+  RCLCPP_INFO(node_->get_logger(),
+              "Waiting %.1f seconds for controller to stabilize after homing...",
+              stabilization_time);
+  node_->get_clock()->sleep_for(
+      rclcpp::Duration::from_seconds(stabilization_time));
 
   RCLCPP_INFO(
       node_->get_logger(),

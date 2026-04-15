@@ -110,10 +110,10 @@ aic_controller:
         - 3.14159 # z
       max_rotational_velocity: 2.0 # [rad/s]
       tracking_error:
-        timeout: 2.0 # [s]
-        min_angular_change: 0.01 #[rad]
-        min_translation_change: 0.01 #[m]
-        min_translation_error: 0.2 #[m] make sure it's larger than min_translation_change to avoid instability
+        timeout: 5.0 # [s] increased from 2.0 to give controller more time to settle after homing
+        min_angular_change: 0.005 #[rad] reduced to detect slower convergence as valid progress
+        min_translation_change: 0.005 #[m] reduced to detect slower convergence as valid progress
+        min_translation_error: 0.3 #[m] increased threshold before reset triggers
 
     control_frequency: 500.0 # [Hz]
 

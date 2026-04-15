@@ -98,6 +98,15 @@ def launch_setup(context, *args, **kwargs):
     model_discovery_timeout_seconds = LaunchConfiguration(
         "model_discovery_timeout_seconds"
     )
+    post_home_stabilization_seconds = LaunchConfiguration(
+        "post_home_stabilization_seconds"
+    )
+    settling_consecutive_readings = LaunchConfiguration(
+        "settling_consecutive_readings"
+    )
+    pre_cable_spawn_stabilization_seconds = LaunchConfiguration(
+        "pre_cable_spawn_stabilization_seconds"
+    )
 
     gripper_initial_pos = "0.00655"
     cable_type_str = LaunchConfiguration("cable_type").perform(context)
@@ -245,6 +254,9 @@ def launch_setup(context, *args, **kwargs):
                 "config_file_path": aic_engine_config_file,
                 "use_sim_time": True,
                 "model_discovery_timeout_seconds": model_discovery_timeout_seconds,
+                "post_home_stabilization_seconds": post_home_stabilization_seconds,
+                "settling_consecutive_readings": settling_consecutive_readings,
+                "pre_cable_spawn_stabilization_seconds": pre_cable_spawn_stabilization_seconds,
             },
         ],
         condition=IfCondition(start_aic_engine),
@@ -773,6 +785,27 @@ def generate_launch_description():
             "model_discovery_timeout_seconds",
             default_value="30",
             description="Timeout for discovering the participant model.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "post_home_stabilization_seconds",
+            default_value="2.0",
+            description="Seconds to wait after homing for the controller to stabilize.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "settling_consecutive_readings",
+            default_value="5",
+            description="Number of consecutive low-velocity joint readings required before proceeding.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "pre_cable_spawn_stabilization_seconds",
+            default_value="1.0",
+            description="Seconds to wait before spawning cable to let the arm fully settle.",
         )
     )
     return LaunchDescription(
