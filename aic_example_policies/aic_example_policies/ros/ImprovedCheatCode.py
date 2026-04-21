@@ -60,7 +60,7 @@ class EMAScalar:
         return self._val
 
 
-class ImprovedCheatCodeV3(Policy):
+class ImprovedCheatCode(Policy):
     def __init__(self, parent_node):
         self._task = None
         self._ix = 0.0
