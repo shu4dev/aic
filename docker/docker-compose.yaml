@@ -17,7 +17,7 @@ services:
   model:
     image: my-solution:v1
     build:
-      dockerfile: docker/aic_model/Dockerfile
+      dockerfile: docker/my_policy/Dockerfile
       context: ..
     gpus: all
     networks:
@@ -27,6 +27,7 @@ services:
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      ACT_POLICY_PATH: model/
       # AIC_ENABLE_ACL: true
 networks:
   default:
