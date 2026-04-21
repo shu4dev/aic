@@ -24,12 +24,11 @@ CONNECTOR_PARAMS = {
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 
-APPROACH_HEIGHT = 0.05
-APPROACH_STEPS = 70
+APPROACH_HEIGHT = 0.03
+APPROACH_STEPS = 80
 APPROACH_DT = 0.04
 EMA_ALPHA = 0.3
-APPROACH_SETTLE = 0.3
-SETTLE_TIME = 0.5
+SETTLE_TIME = 1.5
 
 
 def min_jerk(t):
@@ -104,7 +103,7 @@ class ImprovedCheatCode(Policy):
         f = obs.wrist_wrench.wrench.force
         return math.sqrt(f.x**2 + f.y**2 + f.z**2)
 
-    def _measure_baseline(self, get_obs, n=5):
+    def _measure_baseline(self, get_obs, n=10):
         samples = []
         for _ in range(n):
             samples.append(self._get_force(get_obs))
@@ -172,7 +171,7 @@ class ImprovedCheatCode(Policy):
             self.sleep_for(APPROACH_DT)
 
         self.get_logger().info("Approach done, settling...")
-        self.sleep_for(APPROACH_SETTLE)
+        self.sleep_for(0.5)
 
     def _align_and_descend(self, move_robot, get_obs, send_feedback):
         params = CONNECTOR_PARAMS.get(self._task.plug_type, DEFAULT_PARAMS)
@@ -217,7 +216,7 @@ class ImprovedCheatCode(Policy):
 
             raw_pos, q_blend = self._calc_raw_target(port, plug, grip, z_offset)
             self._send_smoothed_pose(move_robot, raw_pos, q_blend)
-            self.sleep_for(0.030)
+            self.sleep_for(0.035)
 
             force = self._get_force(get_obs)
             df = force - baseline
@@ -259,7 +258,7 @@ class ImprovedCheatCode(Policy):
             self.get_logger().info(f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm")
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
-        self.get_logger().info(f"V3.insert_cable() task: {task}")
+        self.get_logger().info(f"ImprovedCheatCodeV2.insert_cable() task: {task}")
         self._task = task
         self._port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
@@ -277,5 +276,5 @@ class ImprovedCheatCode(Policy):
         self.get_logger().info("Stabilizing...")
         self.sleep_for(SETTLE_TIME)
 
-        self.get_logger().info("V3.insert_cable() done")
+        self.get_logger().info("ImprovedCheatCodeV2.insert_cable() exiting...")
         return True
