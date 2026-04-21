@@ -17,19 +17,19 @@ from transforms3d._gohlketransforms import quaternion_multiply, quaternion_slerp
 QuaternionTuple = tuple[float, float, float, float]
 
 CONNECTOR_PARAMS = {
-    "sfp": {"max_depth": -0.022, "force_limit": 15.0},
-    "sc":  {"max_depth": -0.020, "force_limit": 12.0},
+    "sfp": {"max_depth": -0.022, "coarse_step": 0.0008, "fine_step": 0.0002,
+            "fine_threshold": 0.01, "force_limit": 15.0},
+    "sc":  {"max_depth": -0.020, "coarse_step": 0.0007, "fine_step": 0.0002,
+            "fine_threshold": 0.008, "force_limit": 12.0},
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 
-APPROACH_HEIGHT = 0.05
-APPROACH_TIME = 3.0
+APPROACH_HEIGHT = 0.03
+APPROACH_STEPS = 70
+APPROACH_DT = 0.04
+EMA_ALPHA = 0.3
 APPROACH_SETTLE = 0.3
-DESCENT_TIME = 2.0
-DT = 0.02
-CORR_ALPHA = 0.08
-MIN_STEP = 0.0003
-SETTLE_TIME = 0.3
+SETTLE_TIME = 0.8
 
 
 def min_jerk(t):
@@ -37,28 +37,20 @@ def min_jerk(t):
     return 10 * t**3 - 15 * t**4 + 6 * t**5
 
 
-def min_jerk_vel(t):
-    t = np.clip(t, 0.0, 1.0)
-    return 30 * t**2 - 60 * t**3 + 30 * t**4
-
-
-class EMAScalar:
-    def __init__(self, alpha):
+class EMAFilter:
+    def __init__(self, alpha=EMA_ALPHA):
         self._alpha = alpha
-        self._val = 0.0
-        self._init = False
+        self._state = None
 
     def reset(self):
-        self._val = 0.0
-        self._init = False
+        self._state = None
 
-    def update(self, x):
-        if not self._init:
-            self._val = x
-            self._init = True
+    def update(self, value):
+        if self._state is None:
+            self._state = np.array(value, dtype=float)
         else:
-            self._val = self._alpha * x + (1.0 - self._alpha) * self._val
-        return self._val
+            self._state = self._alpha * np.array(value) + (1.0 - self._alpha) * self._state
+        return self._state.copy()
 
 
 class ImprovedCheatCode(Policy):
@@ -68,8 +60,7 @@ class ImprovedCheatCode(Policy):
         self._iy = 0.0
         self._max_windup = 0.05
         self._i_gain = 0.15
-        self._cx_ema = EMAScalar(CORR_ALPHA)
-        self._cy_ema = EMAScalar(CORR_ALPHA)
+        self._pos_filter = EMAFilter()
         super().__init__(parent_node)
 
     def _wait_for_tf(self, target, source, timeout_sec=15.0):
@@ -117,12 +108,11 @@ class ImprovedCheatCode(Policy):
         samples = []
         for _ in range(n):
             samples.append(self._get_force(get_obs))
-            self.sleep_for(0.015)
+            self.sleep_for(0.02)
         return sum(samples) / len(samples)
 
-    def _compute_pose(self, port, plug, grip, z_offset,
-                      slerp_frac=1.0, pos_frac=1.0,
-                      use_correction=False):
+    def _calc_raw_target(self, port, plug, grip, z_offset,
+                         slerp_frac=1.0, pos_frac=1.0, reset_integrator=False):
         q_port = self._q(port.rotation)
         q_plug = self._q(plug.rotation)
         q_grip = self._q(grip.rotation)
@@ -133,137 +123,101 @@ class ImprovedCheatCode(Policy):
         q_blend = quaternion_slerp(q_grip, q_target, slerp_frac)
 
         gx, gy, gz = grip.translation.x, grip.translation.y, grip.translation.z
-        gx_off = gx - plug.translation.x
-        gy_off = gy - plug.translation.y
         gz_off = gz - plug.translation.z
 
-        base_x = port.translation.x + gx_off
-        base_y = port.translation.y + gy_off
-        base_z = port.translation.z + z_offset + gz_off
+        ex = port.translation.x - plug.translation.x
+        ey = port.translation.y - plug.translation.y
 
-        if use_correction:
-            ex = port.translation.x - plug.translation.x
-            ey = port.translation.y - plug.translation.y
+        if reset_integrator:
+            self._ix = 0.0
+            self._iy = 0.0
+        else:
             self._ix = np.clip(self._ix + ex, -self._max_windup, self._max_windup)
             self._iy = np.clip(self._iy + ey, -self._max_windup, self._max_windup)
-            cx = self._cx_ema.update(self._i_gain * self._ix)
-            cy = self._cy_ema.update(self._i_gain * self._iy)
-            tx = base_x + cx
-            ty = base_y + cy
-        else:
-            tx = base_x
-            ty = base_y
-        tz = base_z
+
+        tx = port.translation.x + self._i_gain * self._ix
+        ty = port.translation.y + self._i_gain * self._iy
+        tz = port.translation.z + z_offset + gz_off
 
         bx = pos_frac * tx + (1.0 - pos_frac) * gx
         by = pos_frac * ty + (1.0 - pos_frac) * gy
         bz = pos_frac * tz + (1.0 - pos_frac) * gz
 
-        return Pose(
-            position=Point(x=bx, y=by, z=bz),
-            orientation=Quaternion(w=q_blend[0], x=q_blend[1],
-                                  y=q_blend[2], z=q_blend[3]),
-        )
+        return (bx, by, bz), q_blend
 
-    def _send(self, move_robot, pose):
+    def _send_smoothed_pose(self, move_robot, raw_pos, q_blend):
+        smoothed = self._pos_filter.update(raw_pos)
+        pose = Pose(
+            position=Point(x=float(smoothed[0]), y=float(smoothed[1]), z=float(smoothed[2])),
+            orientation=Quaternion(w=q_blend[0], x=q_blend[1], y=q_blend[2], z=q_blend[3]),
+        )
         self.set_pose_target(move_robot=move_robot, pose=pose)
 
     def _approach(self, move_robot, send_feedback):
-        send_feedback("Approaching...")
-        n_steps = int(APPROACH_TIME / DT)
-        for i in range(n_steps):
-            frac = min_jerk(i / n_steps)
+        send_feedback("Approaching port...")
+        self._pos_filter.reset()
+
+        for t in range(APPROACH_STEPS):
+            frac = min_jerk(t / APPROACH_STEPS)
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
             if not all([port, plug, grip]):
-                self.sleep_for(DT)
+                self.sleep_for(APPROACH_DT)
                 continue
-            pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
-                                      slerp_frac=frac, pos_frac=frac,
-                                      use_correction=False)
-            self._send(move_robot, pose)
-            self.sleep_for(DT)
+            raw_pos, q_blend = self._calc_raw_target(
+                port, plug, grip, APPROACH_HEIGHT,
+                slerp_frac=frac, pos_frac=frac, reset_integrator=True)
+            self._send_smoothed_pose(move_robot, raw_pos, q_blend)
+            self.sleep_for(APPROACH_DT)
 
         self.get_logger().info("Approach done, settling...")
-        n_settle = int(APPROACH_SETTLE / DT)
-        for _ in range(n_settle):
-            port = self._port_tf()
-            plug = self._plug_tf()
-            grip = self._grip_tf()
-            if not all([port, plug, grip]):
-                self.sleep_for(DT)
-                continue
-            pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
-                                      slerp_frac=1.0, pos_frac=1.0,
-                                      use_correction=False)
-            self._send(move_robot, pose)
-            self.sleep_for(DT)
+        self.sleep_for(APPROACH_SETTLE)
 
-    def _descend(self, move_robot, get_obs, send_feedback):
+    def _align_and_descend(self, move_robot, get_obs, send_feedback):
         params = CONNECTOR_PARAMS.get(self._task.plug_type, DEFAULT_PARAMS)
-        max_depth = params["max_depth"]
-        force_limit = params["force_limit"]
-        total_z = APPROACH_HEIGHT - max_depth
-
         self._ix = 0.0
         self._iy = 0.0
-        self._cx_ema.reset()
-        self._cy_ema.reset()
+        self._pos_filter.reset()
 
         baseline = self._measure_baseline(get_obs)
         self.get_logger().info(f"Force baseline: {baseline:.1f}N")
 
-        send_feedback("Aligning...")
-        max_align_iters = 150
-        for i in range(max_align_iters):
+        z_offset = APPROACH_HEIGHT
+        consecutive_jams = 0
+
+        send_feedback("Aligning and descending...")
+
+        while True:
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
             if not all([port, plug, grip]):
-                self.sleep_for(DT)
+                self.sleep_for(0.03)
                 continue
+
             ex = port.translation.x - plug.translation.x
             ey = port.translation.y - plug.translation.y
             xy_err = math.sqrt(ex**2 + ey**2)
-            pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
-                                      use_correction=True)
-            self._send(move_robot, pose)
-            self.sleep_for(DT)
-            if xy_err < 0.002:
-                self.get_logger().info(
-                    f"Aligned: xy={xy_err*1000:.2f}mm after {i} iters")
-                break
 
-        send_feedback("Inserting...")
-        z_offset = APPROACH_HEIGHT
-        t = 0.0
-        consecutive_jams = 0
-
-        while z_offset > max_depth:
-            tau = np.clip(t / DESCENT_TIME, 0.0, 1.0)
-            if tau < 1.0:
-                speed = min_jerk_vel(tau) * total_z / DESCENT_TIME
+            if z_offset > params["fine_threshold"]:
+                step = params["coarse_step"]
+                if xy_err > 0.003:
+                    step *= 0.3
             else:
-                speed = 0.5 * total_z / DESCENT_TIME
-            step = max(speed * DT, MIN_STEP)
+                step = params["fine_step"]
 
             z_offset -= step
-            z_offset = max(z_offset, max_depth)
 
-            port = self._port_tf()
-            plug = self._plug_tf()
-            grip = self._grip_tf()
-            if not all([port, plug, grip]):
-                self.sleep_for(DT)
-                continue
+            if z_offset < params["max_depth"]:
+                self.get_logger().info("Reached max depth")
+                break
 
             plug_z_before = plug.translation.z
 
-            pose = self._compute_pose(port, plug, grip, z_offset,
-                                      use_correction=True)
-            self._send(move_robot, pose)
-            self.sleep_for(DT)
+            raw_pos, q_blend = self._calc_raw_target(port, plug, grip, z_offset)
+            self._send_smoothed_pose(move_robot, raw_pos, q_blend)
+            self.sleep_for(0.035)
 
             force = self._get_force(get_obs)
             df = force - baseline
@@ -271,32 +225,30 @@ class ImprovedCheatCode(Policy):
             plug_after = self._plug_tf()
             dz = (plug_z_before - plug_after.translation.z) if plug_after else step
 
-            if df > force_limit:
+            if df > params["force_limit"]:
                 if dz < step * 0.3:
                     consecutive_jams += 1
                     self.get_logger().warn(
-                        f"JAM: df={df:.1f}N dz={dz*1000:.3f}mm "
-                        f"z={z_offset:.4f} jams={consecutive_jams}"
+                        f"JAM: df={df:.1f}N dz={dz*1000:.3f}mm z={z_offset:.4f} jams={consecutive_jams}"
                     )
                     z_offset += step * 3
-                    pose = self._compute_pose(port, plug, grip, z_offset,
-                                              use_correction=True)
-                    self._send(move_robot, pose)
+                    raw_pos, q_blend = self._calc_raw_target(port, plug, grip, z_offset)
+                    self._send_smoothed_pose(move_robot, raw_pos, q_blend)
                     self.sleep_for(0.1)
                     if consecutive_jams >= 5:
                         self.get_logger().warn("Too many jams, stopping")
                         break
-                    continue
                 else:
-                    self.get_logger().info(
-                        f"Force df={df:.1f}N but moving dz={dz*1000:.3f}mm"
-                    )
+                    self.get_logger().info(f"Force df={df:.1f}N but moving dz={dz*1000:.3f}mm")
                     consecutive_jams = 0
             else:
-                if consecutive_jams > 0 and df < force_limit * 0.3:
+                if consecutive_jams > 0 and df < params["force_limit"] * 0.3:
                     consecutive_jams = max(0, consecutive_jams - 1)
 
-            t += DT
+            if z_offset % 0.005 < step:
+                self.get_logger().info(
+                    f"[desc] z={z_offset:.4f} df={df:.1f}N xy={xy_err*1000:.1f}mm"
+                )
 
         plug = self._plug_tf()
         port = self._port_tf()
@@ -304,10 +256,7 @@ class ImprovedCheatCode(Policy):
             ex = port.translation.x - plug.translation.x
             ey = port.translation.y - plug.translation.y
             z_gap = plug.translation.z - port.translation.z
-            self.get_logger().info(
-                f"Final: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm "
-                f"z_gap={z_gap*1000:.2f}mm"
-            )
+            self.get_logger().info(f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm")
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         self.get_logger().info(f"V3.insert_cable() task: {task}")
@@ -316,8 +265,6 @@ class ImprovedCheatCode(Policy):
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
         self._ix = 0.0
         self._iy = 0.0
-        self._cx_ema.reset()
-        self._cy_ema.reset()
 
         for frame in [self._port_frame, self._plug_frame]:
             if not self._wait_for_tf("base_link", frame):
@@ -325,9 +272,10 @@ class ImprovedCheatCode(Policy):
                 return False
 
         self._approach(move_robot, send_feedback)
-        self._descend(move_robot, get_observation, send_feedback)
+        self._align_and_descend(move_robot, get_observation, send_feedback)
 
         self.get_logger().info("Stabilizing...")
         self.sleep_for(SETTLE_TIME)
+
         self.get_logger().info("V3.insert_cable() done")
         return True
