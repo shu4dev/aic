@@ -10,6 +10,18 @@ sudo passwd ubuntu
 
 scp -r -i your-key.pem ubuntu@<ec2-ip>:/path/to/folder ./local-destination/
 ```
+
+## Docker Custom image Note
+```shell
+echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+
+docker pull ghcr.io/YOUR_GITHUB_USERNAME/aic-eval:v1
+
+export DBX_CONTAINER_MANAGER=docker
+
+distrobox create -r --nvidia -i ghcr.io/shu4dev/aic-eval:v1 aic_eval_v1
+distrobox enter -r aic_eval_v1
+```
 # AI for Industry Challenge Toolkit
 
 [![build](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml)
