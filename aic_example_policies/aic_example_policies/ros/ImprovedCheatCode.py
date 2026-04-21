@@ -23,12 +23,13 @@ CONNECTOR_PARAMS = {
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 
 APPROACH_HEIGHT = 0.05
-APPROACH_TIME = 2.5
-DESCENT_TIME = 3.0
+APPROACH_TIME = 3.0
+APPROACH_SETTLE = 0.3
+DESCENT_TIME = 2.0
 DT = 0.02
 CORR_ALPHA = 0.08
 MIN_STEP = 0.00005
-SETTLE_TIME = 0.5
+SETTLE_TIME = 0.3
 
 
 def min_jerk(t):
@@ -132,10 +133,12 @@ class ImprovedCheatCode(Policy):
         q_blend = quaternion_slerp(q_grip, q_target, slerp_frac)
 
         gx, gy, gz = grip.translation.x, grip.translation.y, grip.translation.z
+        gx_off = gx - plug.translation.x
+        gy_off = gy - plug.translation.y
         gz_off = gz - plug.translation.z
 
-        base_x = port.translation.x
-        base_y = port.translation.y
+        base_x = port.translation.x + gx_off
+        base_y = port.translation.y + gy_off
         base_z = port.translation.z + z_offset + gz_off
 
         if use_correction:
@@ -178,6 +181,21 @@ class ImprovedCheatCode(Policy):
                 continue
             pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
                                       slerp_frac=frac, pos_frac=frac,
+                                      use_correction=False)
+            self._send(move_robot, pose)
+            self.sleep_for(DT)
+
+        self.get_logger().info("Approach done, settling...")
+        n_settle = int(APPROACH_SETTLE / DT)
+        for _ in range(n_settle):
+            port = self._port_tf()
+            plug = self._plug_tf()
+            grip = self._grip_tf()
+            if not all([port, plug, grip]):
+                self.sleep_for(DT)
+                continue
+            pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
+                                      slerp_frac=1.0, pos_frac=1.0,
                                       use_correction=False)
             self._send(move_robot, pose)
             self.sleep_for(DT)
