@@ -29,7 +29,7 @@ APPROACH_STEPS = 70
 APPROACH_DT = 0.04
 EMA_ALPHA = 0.3
 APPROACH_SETTLE = 0.3
-SETTLE_TIME = 0.8
+SETTLE_TIME = 0.5
 
 
 def min_jerk(t):
@@ -53,7 +53,7 @@ class EMAFilter:
         return self._state.copy()
 
 
-class ImprovedCheatCode(Policy):
+class ImprovedCheatCodeV3(Policy):
     def __init__(self, parent_node):
         self._task = None
         self._ix = 0.0
@@ -217,7 +217,7 @@ class ImprovedCheatCode(Policy):
 
             raw_pos, q_blend = self._calc_raw_target(port, plug, grip, z_offset)
             self._send_smoothed_pose(move_robot, raw_pos, q_blend)
-            self.sleep_for(0.035)
+            self.sleep_for(0.030)
 
             force = self._get_force(get_obs)
             df = force - baseline
