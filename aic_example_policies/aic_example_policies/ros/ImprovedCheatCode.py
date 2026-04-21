@@ -1,5 +1,4 @@
 import math
-import os
 import numpy as np
 
 from aic_model.policy import (
@@ -33,7 +32,6 @@ class ImprovedCheatCode(Policy):
         self._iy = 0.0
         self._max_windup = 0.05
         self._i_gain = 0.15
-        self._approach_only = os.environ.get("CHEATCODE_APPROACH_ONLY", "0") == "1"
         super().__init__(parent_node)
 
     def _wait_for_tf(self, target, source, timeout_sec=15.0):
@@ -177,11 +175,6 @@ class ImprovedCheatCode(Policy):
                 self.sleep_for(0.03)
 
                 if xy_err < 0.002 or align_iters >= max_align_iters:
-                    if self._approach_only:
-                        self.get_logger().info(
-                            f"Approach-only mode: aligned xy={xy_err*1000:.2f}mm after {align_iters} iters, skipping descent"
-                        )
-                        break
                     self.get_logger().info(f"Starting descent: xy={xy_err*1000:.2f}mm after {align_iters} iters")
                     descending = True
                     send_feedback("Descending...")
@@ -240,8 +233,7 @@ class ImprovedCheatCode(Policy):
             self.get_logger().info(f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm")
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
-        mode = "APPROACH-ONLY (no insertion)" if self._approach_only else "FULL (approach + insert)"
-        self.get_logger().info(f"ImprovedCheatCode.insert_cable() mode={mode} task: {task}")
+        self.get_logger().info(f"ImprovedCheatCode.insert_cable() task: {task}")
         self._task = task
         self._port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
