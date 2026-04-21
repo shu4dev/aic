@@ -18,24 +18,10 @@ from transforms3d._gohlketransforms import quaternion_multiply, quaternion_slerp
 QuaternionTuple = tuple[float, float, float, float]
 
 CONNECTOR_PARAMS = {
-    "sfp": {
-        "max_depth": -0.022,
-        "coarse_step": 0.0012,
-        "fine_step": 0.0003,
-        "fine_threshold": 0.01,
-        "force_limit": 15.0,
-        "force_ref": 4.0,
-        "force_soft": 8.0,
-    },
-    "sc": {
-        "max_depth": -0.020,
-        "coarse_step": 0.0010,
-        "fine_step": 0.0003,
-        "fine_threshold": 0.008,
-        "force_limit": 12.0,
-        "force_ref": 3.5,
-        "force_soft": 7.0,
-    },
+    "sfp": {"max_depth": -0.022, "coarse_step": 0.0012, "fine_step": 0.0003,
+            "fine_threshold": 0.01, "force_limit": 15.0},
+    "sc":  {"max_depth": -0.020, "coarse_step": 0.0010, "fine_step": 0.0003,
+            "fine_threshold": 0.008, "force_limit": 12.0},
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 
@@ -201,21 +187,7 @@ class ImprovedCheatCode(Policy):
                     send_feedback("Descending...")
                 continue
 
-            base_step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
-
-            force_now = self._get_force(get_obs)
-            df_now = max(0.0, force_now - baseline)
-            F_ref = params["force_ref"]
-            F_soft = params["force_soft"]
-
-            if df_now <= F_ref:
-                step = base_step
-            elif df_now < F_soft:
-                scale = 1.0 - (df_now - F_ref) / (F_soft - F_ref)
-                step = base_step * max(0.1, scale)
-            else:
-                step = -base_step * 0.5
-
+            step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
             z_offset -= step
 
             if z_offset < params["max_depth"]:
@@ -235,12 +207,12 @@ class ImprovedCheatCode(Policy):
             dz = (plug_z_before - plug_after.translation.z) if plug_after else step
 
             if df > params["force_limit"]:
-                if dz < base_step * 0.3:
+                if dz < step * 0.3:
                     consecutive_jams += 1
                     self.get_logger().warn(
                         f"JAM: df={df:.1f}N dz={dz*1000:.3f}mm z={z_offset:.4f} jams={consecutive_jams}"
                     )
-                    z_offset += base_step * 3
+                    z_offset += step * 3
                     pose = self._calc_pose(port, plug, grip, z_offset)
                     self.set_pose_target(move_robot=move_robot, pose=pose)
                     self.sleep_for(0.1)
@@ -254,9 +226,9 @@ class ImprovedCheatCode(Policy):
                 if consecutive_jams > 0 and df < params["force_limit"] * 0.3:
                     consecutive_jams = max(0, consecutive_jams - 1)
 
-            if z_offset % 0.005 < base_step:
+            if z_offset % 0.005 < step:
                 self.get_logger().info(
-                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm xy={xy_err*1000:.1f}mm step={step*1000:.3f}mm"
+                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm xy={xy_err*1000:.1f}mm"
                 )
 
         plug = self._plug_tf()
