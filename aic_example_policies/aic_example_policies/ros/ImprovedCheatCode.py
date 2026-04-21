@@ -28,7 +28,7 @@ APPROACH_SETTLE = 0.3
 DESCENT_TIME = 2.0
 DT = 0.02
 CORR_ALPHA = 0.08
-MIN_STEP = 0.00005
+MIN_STEP = 0.0003
 SETTLE_TIME = 0.3
 
 
@@ -213,6 +213,27 @@ class ImprovedCheatCode(Policy):
 
         baseline = self._measure_baseline(get_obs)
         self.get_logger().info(f"Force baseline: {baseline:.1f}N")
+
+        send_feedback("Aligning...")
+        max_align_iters = 150
+        for i in range(max_align_iters):
+            port = self._port_tf()
+            plug = self._plug_tf()
+            grip = self._grip_tf()
+            if not all([port, plug, grip]):
+                self.sleep_for(DT)
+                continue
+            ex = port.translation.x - plug.translation.x
+            ey = port.translation.y - plug.translation.y
+            xy_err = math.sqrt(ex**2 + ey**2)
+            pose = self._compute_pose(port, plug, grip, APPROACH_HEIGHT,
+                                      use_correction=True)
+            self._send(move_robot, pose)
+            self.sleep_for(DT)
+            if xy_err < 0.002:
+                self.get_logger().info(
+                    f"Aligned: xy={xy_err*1000:.2f}mm after {i} iters")
+                break
 
         send_feedback("Inserting...")
         z_offset = APPROACH_HEIGHT
