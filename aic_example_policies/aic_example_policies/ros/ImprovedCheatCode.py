@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 
 from aic_model.policy import (
@@ -17,10 +18,24 @@ from transforms3d._gohlketransforms import quaternion_multiply, quaternion_slerp
 QuaternionTuple = tuple[float, float, float, float]
 
 CONNECTOR_PARAMS = {
-    "sfp": {"max_depth": -0.022, "coarse_step": 0.0012, "fine_step": 0.0003,
-            "fine_threshold": 0.01, "force_limit": 15.0},
-    "sc":  {"max_depth": -0.020, "coarse_step": 0.0010, "fine_step": 0.0003,
-            "fine_threshold": 0.008, "force_limit": 12.0},
+    "sfp": {
+        "max_depth": -0.022,
+        "coarse_step": 0.0012,
+        "fine_step": 0.0003,
+        "fine_threshold": 0.01,
+        "force_limit": 15.0,
+        "force_ref": 4.0,
+        "force_soft": 8.0,
+    },
+    "sc": {
+        "max_depth": -0.020,
+        "coarse_step": 0.0010,
+        "fine_step": 0.0003,
+        "fine_threshold": 0.008,
+        "force_limit": 12.0,
+        "force_ref": 3.5,
+        "force_soft": 7.0,
+    },
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 
@@ -32,6 +47,7 @@ class ImprovedCheatCode(Policy):
         self._iy = 0.0
         self._max_windup = 0.05
         self._i_gain = 0.15
+        self._approach_only = os.environ.get("CHEATCODE_APPROACH_ONLY", "0") == "1"
         super().__init__(parent_node)
 
     def _wait_for_tf(self, target, source, timeout_sec=15.0):
@@ -175,12 +191,31 @@ class ImprovedCheatCode(Policy):
                 self.sleep_for(0.03)
 
                 if xy_err < 0.002 or align_iters >= max_align_iters:
+                    if self._approach_only:
+                        self.get_logger().info(
+                            f"Approach-only mode: aligned xy={xy_err*1000:.2f}mm after {align_iters} iters, skipping descent"
+                        )
+                        break
                     self.get_logger().info(f"Starting descent: xy={xy_err*1000:.2f}mm after {align_iters} iters")
                     descending = True
                     send_feedback("Descending...")
                 continue
 
-            step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
+            base_step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
+
+            force_now = self._get_force(get_obs)
+            df_now = max(0.0, force_now - baseline)
+            F_ref = params["force_ref"]
+            F_soft = params["force_soft"]
+
+            if df_now <= F_ref:
+                step = base_step
+            elif df_now < F_soft:
+                scale = 1.0 - (df_now - F_ref) / (F_soft - F_ref)
+                step = base_step * max(0.1, scale)
+            else:
+                step = -base_step * 0.5
+
             z_offset -= step
 
             if z_offset < params["max_depth"]:
@@ -200,12 +235,12 @@ class ImprovedCheatCode(Policy):
             dz = (plug_z_before - plug_after.translation.z) if plug_after else step
 
             if df > params["force_limit"]:
-                if dz < step * 0.3:
+                if dz < base_step * 0.3:
                     consecutive_jams += 1
                     self.get_logger().warn(
                         f"JAM: df={df:.1f}N dz={dz*1000:.3f}mm z={z_offset:.4f} jams={consecutive_jams}"
                     )
-                    z_offset += step * 3
+                    z_offset += base_step * 3
                     pose = self._calc_pose(port, plug, grip, z_offset)
                     self.set_pose_target(move_robot=move_robot, pose=pose)
                     self.sleep_for(0.1)
@@ -219,9 +254,9 @@ class ImprovedCheatCode(Policy):
                 if consecutive_jams > 0 and df < params["force_limit"] * 0.3:
                     consecutive_jams = max(0, consecutive_jams - 1)
 
-            if z_offset % 0.005 < step:
+            if z_offset % 0.005 < base_step:
                 self.get_logger().info(
-                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm xy={xy_err*1000:.1f}mm"
+                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm xy={xy_err*1000:.1f}mm step={step*1000:.3f}mm"
                 )
 
         plug = self._plug_tf()
@@ -233,7 +268,8 @@ class ImprovedCheatCode(Policy):
             self.get_logger().info(f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm")
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
-        self.get_logger().info(f"ImprovedCheatCode.insert_cable() task: {task}")
+        mode = "APPROACH-ONLY (no insertion)" if self._approach_only else "FULL (approach + insert)"
+        self.get_logger().info(f"ImprovedCheatCode.insert_cable() mode={mode} task: {task}")
         self._task = task
         self._port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
