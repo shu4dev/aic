@@ -1,5 +1,6 @@
 import math
 import os
+
 import numpy as np
 
 from aic_model.policy import (
@@ -48,6 +49,8 @@ class ImprovedCheatCode(Policy):
         self._max_windup = 0.05
         self._i_gain = 0.15
         self._approach_only = os.environ.get("CHEATCODE_APPROACH_ONLY", "0") == "1"
+        self._prev_grip = None
+        self._prev_t = None
         super().__init__(parent_node)
 
     def _wait_for_tf(self, target, source, timeout_sec=15.0):
@@ -94,9 +97,34 @@ class ImprovedCheatCode(Policy):
     def _measure_baseline(self, get_obs, n=10):
         samples = []
         for _ in range(n):
+            grip = self._grip_tf()
+            if grip is not None:
+                self._log_vel(grip, "baseline")
             samples.append(self._get_force(get_obs))
             self.sleep_for(0.02)
         return sum(samples) / len(samples)
+
+    def _reset_vel_tracker(self):
+        self._prev_grip = None
+        self._prev_t = None
+
+    def _log_vel(self, grip, tag):
+        now = self.time_now().nanoseconds / 1e9
+        if self._prev_grip is not None and self._prev_t is not None:
+            dt = now - self._prev_t
+            if dt > 0.001:
+                dx = grip.translation.x - self._prev_grip[0]
+                dy = grip.translation.y - self._prev_grip[1]
+                dz = grip.translation.z - self._prev_grip[2]
+                vx = dx / dt
+                vy = dy / dt
+                vz = dz / dt
+                v = math.sqrt(vx * vx + vy * vy + vz * vz)
+                self.get_logger().info(
+                    f"[vel:{tag}] v={v*1000:.2f} vx={vx*1000:.2f} vy={vy*1000:.2f} vz={vz*1000:.2f} dt={dt*1000:.1f}"
+                )
+        self._prev_grip = (grip.translation.x, grip.translation.y, grip.translation.z)
+        self._prev_t = now
 
     def _calc_pose(self, port, plug, grip, z_offset,
                    slerp_frac=1.0, pos_frac=1.0, reset_integrator=False):
@@ -137,14 +165,15 @@ class ImprovedCheatCode(Policy):
 
     def _approach(self, move_robot, send_feedback):
         send_feedback("Approaching port...")
-        for t in range(100):
-            frac = 0.5 * (1.0 - math.cos(math.pi * t / 100))
+        for t in range(150):
+            frac = 0.5 * (1.0 - math.cos(math.pi * t / 150))
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
             if not all([port, plug, grip]):
                 self.sleep_for(0.03)
                 continue
+            self._log_vel(grip, "approach")
             pose = self._calc_pose(port, plug, grip, 0.05,
                                    slerp_frac=frac, pos_frac=frac, reset_integrator=True)
             self.set_pose_target(move_robot=move_robot, pose=pose)
@@ -163,12 +192,15 @@ class ImprovedCheatCode(Policy):
         z_offset = 0.05
         align_iters = 0
         max_align_iters = 200
-        descending = False
-        consecutive_jams = 0
+        align_xy_threshold = 0.0015
+        plug_vel_threshold = 0.0003
+        required_stable = 3
+        stable_count = 0
+        aligned = False
+        prev_plug_xy = None
 
         send_feedback("Aligning...")
-
-        while True:
+        while align_iters < max_align_iters:
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
@@ -180,25 +212,79 @@ class ImprovedCheatCode(Policy):
             ey = port.translation.y - plug.translation.y
             xy_err = math.sqrt(ex**2 + ey**2)
 
-            if not descending:
-                align_iters += 1
-                if align_iters % 30 == 0:
-                    self.get_logger().info(
-                        f"[align {align_iters}] xy={xy_err*1000:.2f}mm ix={self._ix*1000:.1f} iy={self._iy*1000:.1f}"
-                    )
-                pose = self._calc_pose(port, plug, grip, z_offset)
-                self.set_pose_target(move_robot=move_robot, pose=pose)
-                self.sleep_for(0.03)
+            if prev_plug_xy is not None:
+                dx = plug.translation.x - prev_plug_xy[0]
+                dy = plug.translation.y - prev_plug_xy[1]
+                plug_vel = math.sqrt(dx**2 + dy**2)
+            else:
+                plug_vel = 1.0
+            prev_plug_xy = (plug.translation.x, plug.translation.y)
 
-                if xy_err < 0.002 or align_iters >= max_align_iters:
-                    if self._approach_only:
-                        self.get_logger().info(
-                            f"Approach-only mode: aligned xy={xy_err*1000:.2f}mm after {align_iters} iters, skipping descent"
-                        )
-                        break
-                    self.get_logger().info(f"Starting descent: xy={xy_err*1000:.2f}mm after {align_iters} iters")
-                    descending = True
-                    send_feedback("Descending...")
+            align_iters += 1
+            if align_iters % 30 == 0:
+                self.get_logger().info(
+                    f"[align {align_iters}] xy={xy_err*1000:.2f}mm v={plug_vel*1000:.2f}mm"
+                )
+
+            self._log_vel(grip, "align")
+            pose = self._calc_pose(port, plug, grip, z_offset)
+            self.set_pose_target(move_robot=move_robot, pose=pose)
+            self.sleep_for(0.03)
+
+            if xy_err < align_xy_threshold and plug_vel < plug_vel_threshold:
+                stable_count += 1
+                if stable_count >= required_stable:
+                    aligned = True
+                    break
+            else:
+                stable_count = 0
+
+        port = self._port_tf()
+        plug = self._plug_tf()
+        if port and plug:
+            final_xy_err = math.sqrt(
+                (port.translation.x - plug.translation.x) ** 2
+                + (port.translation.y - plug.translation.y) ** 2
+            )
+        else:
+            final_xy_err = 999.0
+
+        if self._approach_only:
+            self.get_logger().info(
+                f"Approach-only mode: xy={final_xy_err*1000:.2f}mm, aligned={aligned}"
+            )
+            return z_offset
+
+        if final_xy_err > 0.006:
+            self.get_logger().warn(
+                f"Alignment did not converge (xy={final_xy_err*1000:.2f}mm), "
+                f"holding instead of descending"
+            )
+            send_feedback("Alignment failed, holding")
+            for _ in range(20):
+                port = self._port_tf()
+                plug = self._plug_tf()
+                grip = self._grip_tf()
+                if all([port, plug, grip]):
+                    self._log_vel(grip, "align_fail_hold")
+                    pose = self._calc_pose(port, plug, grip, z_offset)
+                    self.set_pose_target(move_robot=move_robot, pose=pose)
+                self.sleep_for(0.04)
+            return z_offset
+
+        self.get_logger().info(
+            f"Starting descent: xy={final_xy_err*1000:.2f}mm after {align_iters} iters"
+        )
+        send_feedback("Descending...")
+
+        consecutive_jams = 0
+
+        while True:
+            port = self._port_tf()
+            plug = self._plug_tf()
+            grip = self._grip_tf()
+            if not all([port, plug, grip]):
+                self.sleep_for(0.03)
                 continue
 
             base_step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
@@ -224,6 +310,7 @@ class ImprovedCheatCode(Policy):
 
             plug_z_before = plug.translation.z
 
+            self._log_vel(grip, "descent")
             pose = self._calc_pose(port, plug, grip, z_offset)
             self.set_pose_target(move_robot=move_robot, pose=pose)
             self.sleep_for(0.04)
@@ -241,6 +328,9 @@ class ImprovedCheatCode(Policy):
                         f"JAM: df={df:.1f}N dz={dz*1000:.3f}mm z={z_offset:.4f} jams={consecutive_jams}"
                     )
                     z_offset += base_step * 3
+                    grip_now = self._grip_tf()
+                    if grip_now is not None:
+                        self._log_vel(grip_now, "jam_backoff")
                     pose = self._calc_pose(port, plug, grip, z_offset)
                     self.set_pose_target(move_robot=move_robot, pose=pose)
                     self.sleep_for(0.1)
@@ -256,7 +346,7 @@ class ImprovedCheatCode(Policy):
 
             if z_offset % 0.005 < base_step:
                 self.get_logger().info(
-                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm xy={xy_err*1000:.1f}mm step={step*1000:.3f}mm"
+                    f"[desc] z={z_offset:.4f} df={df:.1f}N dz={dz*1000:.3f}mm step={step*1000:.3f}mm"
                 )
 
         plug = self._plug_tf()
@@ -265,7 +355,11 @@ class ImprovedCheatCode(Policy):
             ex = port.translation.x - plug.translation.x
             ey = port.translation.y - plug.translation.y
             z_gap = plug.translation.z - port.translation.z
-            self.get_logger().info(f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm")
+            self.get_logger().info(
+                f"Done: xy={math.sqrt(ex**2+ey**2)*1000:.2f}mm z_gap={z_gap*1000:.2f}mm"
+            )
+
+        return z_offset
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         mode = "APPROACH-ONLY (no insertion)" if self._approach_only else "FULL (approach + insert)"
@@ -275,6 +369,7 @@ class ImprovedCheatCode(Policy):
         self._plug_frame = f"{task.cable_name}/{task.plug_name}_link"
         self._ix = 0.0
         self._iy = 0.0
+        self._reset_vel_tracker()
 
         for frame in [self._port_frame, self._plug_frame]:
             if not self._wait_for_tf("base_link", frame):
@@ -282,10 +377,18 @@ class ImprovedCheatCode(Policy):
                 return False
 
         self._approach(move_robot, send_feedback)
-        self._align_and_descend(move_robot, get_observation, send_feedback)
+        final_z = self._align_and_descend(move_robot, get_observation, send_feedback)
 
         self.get_logger().info("Stabilizing...")
-        self.sleep_for(1.5)
+        for _ in range(20):
+            port = self._port_tf()
+            plug = self._plug_tf()
+            grip = self._grip_tf()
+            if all([port, plug, grip]):
+                self._log_vel(grip, "hold")
+                pose = self._calc_pose(port, plug, grip, final_z)
+                self.set_pose_target(move_robot=move_robot, pose=pose)
+            self.sleep_for(0.04)
 
         self.get_logger().info("ImprovedCheatCode.insert_cable() exiting...")
         return True
