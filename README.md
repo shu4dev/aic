@@ -25,9 +25,8 @@ distrobox enter -r aic_eval_v1
 
 ## Starting Note
 ```shell
-/entrypoint.sh ground_truth:=false start_aic_engine:=true aic_engine_config_file:=~/
-
-pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.Noisy
+/entrypoint.sh ground_truth:=true start_aic_engine:=true aic_engine_config_file:=/home/ubuntu/ws_aic/src/aic/aic_engine/config/10_nic_trials.yaml    
+pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.NoisyImprovedCheatCode
 ```
 # AI for Industry Challenge Toolkit
 
