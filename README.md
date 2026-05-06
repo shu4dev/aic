@@ -22,6 +22,13 @@ export DBX_CONTAINER_MANAGER=docker
 distrobox create -r --nvidia -i ghcr.io/shu4dev/aic-eval:v1 aic_eval_v1
 distrobox enter -r aic_eval_v1
 ```
+
+## Starting Note
+```shell
+/entrypoint.sh ground_truth:=false start_aic_engine:=true aic_engine_config_file:=~/
+
+pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.Noisy
+```
 # AI for Industry Challenge Toolkit
 
 [![build](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml)
