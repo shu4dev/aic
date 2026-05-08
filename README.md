@@ -13,14 +13,20 @@ scp -r -i your-key.pem ubuntu@<ec2-ip>:/path/to/folder ./local-destination/
 
 ## Docker Custom image Note
 ```shell
-echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u shu4dev --password-stdin
 
-docker pull ghcr.io/YOUR_GITHUB_USERNAME/aic-eval:v1
+docker pull ghcr.io/shu4dev/aic-eval:v1
 
 export DBX_CONTAINER_MANAGER=docker
 
 distrobox create -r --nvidia -i ghcr.io/shu4dev/aic-eval:v1 aic_eval_v1
 distrobox enter -r aic_eval_v1
+```
+
+## Starting Note
+```shell
+/entrypoint.sh ground_truth:=true start_aic_engine:=true aic_engine_config_file:=/home/ubuntu/ws_aic/src/aic/aic_engine/config/10_nic_trials.yaml    
+pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.NoisyImprovedCheatCode
 ```
 # AI for Industry Challenge Toolkit
 
