@@ -32,6 +32,7 @@ Phases:
 
 import math
 import os
+from collections import deque
 
 import numpy as np
 from geometry_msgs.msg import Point, Pose
@@ -85,9 +86,14 @@ class RunACTThenInsert(Policy):
         # once, before aic_engine activates the lifecycle.
         self._act = RunACT(parent_node)
 
-        # Phase-1 (handoff) knobs
-        self._force_threshold = float(os.environ.get("HANDOFF_FORCE_THRESHOLD", "3.0"))
-        self._confirm_frames = int(os.environ.get("HANDOFF_CONFIRM_FRAMES", "3"))
+        # Phase-1 (handoff) knobs. The approach is considered "done" when the
+        # TCP has barely moved over a sliding sim-time window — i.e., ACT has
+        # finished its trajectory and is just holding pose. A force-only
+        # trigger fires too early because ACT itself exerts force during its
+        # own descent toward the port.
+        self._settled_window_s = float(os.environ.get("HANDOFF_SETTLED_WINDOW_S", "1.0"))
+        self._settled_disp_m = float(os.environ.get("HANDOFF_SETTLED_DISPLACEMENT_M", "0.001"))
+        self._min_approach_s = float(os.environ.get("HANDOFF_MIN_APPROACH_S", "3.0"))
         self._handoff_timeout_s = float(os.environ.get("HANDOFF_TIMEOUT_S", "60.0"))
 
         # Phase-2 (descent) knobs
@@ -99,9 +105,10 @@ class RunACTThenInsert(Policy):
         self._max_jams = int(os.environ.get("MAX_JAMS", "5"))
 
         self.get_logger().info(
-            f"[RunACTThenInsert] init: handoff_threshold={self._force_threshold}N "
-            f"confirm_frames={self._confirm_frames} timeout={self._handoff_timeout_s}s "
-            f"max_jams={self._max_jams}"
+            f"[RunACTThenInsert] init: settled_window={self._settled_window_s}s "
+            f"settled_disp={self._settled_disp_m*1000:.2f}mm "
+            f"min_approach={self._min_approach_s}s "
+            f"timeout={self._handoff_timeout_s}s max_jams={self._max_jams}"
         )
 
     # ---------------------------------------------------------------------
@@ -122,10 +129,16 @@ class RunACTThenInsert(Policy):
         return float(smoothed[2])
 
     # ---------------------------------------------------------------------
-    # Phase 1 — ACT approach with contact monitor
+    # Phase 1 — ACT approach until trajectory completes (TCP stillness)
     # ---------------------------------------------------------------------
-    def _run_act_until_contact(self, task, get_observation, move_robot, send_feedback):
-        """Run ACT inference loop, breaking on contact force or timeout.
+    def _run_act_until_settled(self, task, get_observation, move_robot, send_feedback):
+        """Run ACT inference loop until the TCP stops moving.
+
+        The trained ACT approach descends to just above the port and holds.
+        We hand off when ACT has finished that trajectory — measured as TCP
+        displacement across a sliding sim-time window. Wrench is logged for
+        diagnostics but is not the trigger: a force-based handoff fires too
+        early because ACT itself exerts force during its own descent.
 
         Returns dict {tcp, baseline_fz, contact_fz, reason} or None if no
         observation ever arrived.
@@ -153,19 +166,23 @@ class RunACTThenInsert(Policy):
         self._act._port_entrance_baselink = None
         self._act._current_task = task
 
-        BASELINE_FRAMES = 10
-        baseline_samples = []
+        # Sliding window of (sim_time_s, x, y, z) for stillness detection.
+        tcp_history = deque()
+        baseline_samples = []  # for diagnostic fz baseline only
         baseline_fz = None
-        above_thresh = 0
+        BASELINE_FRAMES = 10
         handoff_tcp = None
-        contact_fz = None
         reason = None
         iter_count = 0
         last_tcp = None
 
         send_feedback("Approaching (ACT)...")
         self.get_logger().info(
-            f"[approach] starting ACT phase, timeout={self._handoff_timeout_s}s "
+            f"[approach] starting ACT phase, "
+            f"settle window={self._settled_window_s}s "
+            f"disp_thresh={self._settled_disp_m*1000:.2f}mm "
+            f"min_approach={self._min_approach_s}s "
+            f"timeout={self._handoff_timeout_s}s "
             f"te={te_coeff_str if use_temporal_ensemble else 'off'}"
         )
 
@@ -176,7 +193,7 @@ class RunACTThenInsert(Policy):
                 reason = "timeout"
                 self.get_logger().warn(
                     f"[handoff] timeout at sim={sim_elapsed:.1f}s "
-                    f"(no contact ≥ {self._force_threshold}N detected)"
+                    f"(TCP never settled below {self._settled_disp_m*1000:.2f}mm)"
                 )
                 break
 
@@ -196,7 +213,7 @@ class RunACTThenInsert(Policy):
             # ACT inference + dispatch (move_robot called inside _act_step)
             self._act._act_step(obs, move_robot)
 
-            # Contact check
+            # --- Diagnostic: track force baseline (not used as a trigger) ---
             fz = self._read_fz(obs)
             if len(baseline_samples) < BASELINE_FRAMES:
                 baseline_samples.append(fz)
@@ -205,30 +222,47 @@ class RunACTThenInsert(Policy):
                     self.get_logger().info(
                         f"[approach] baseline_fz={baseline_fz:.2f}N (n={BASELINE_FRAMES})"
                     )
-            elif baseline_fz is not None:
-                df = abs(fz - baseline_fz)
-                if df > self._force_threshold:
-                    above_thresh += 1
-                    if above_thresh >= self._confirm_frames:
-                        handoff_tcp = obs.controller_state.tcp_pose
-                        contact_fz = fz
-                        reason = "contact"
-                        self.get_logger().info(
-                            f"[handoff] contact at iter={iter_count} fz={fz:.2f}N "
-                            f"baseline={baseline_fz:.2f}N df={df:.2f}N "
-                            f"tcp=({handoff_tcp.position.x:.3f},"
-                            f"{handoff_tcp.position.y:.3f},"
-                            f"{handoff_tcp.position.z:.3f})"
-                        )
-                        break
-                else:
-                    above_thresh = 0
+
+            # --- Primary trigger: TCP stillness over a sliding sim-time window ---
+            tcp_history.append(
+                (sim_elapsed, last_tcp.position.x, last_tcp.position.y, last_tcp.position.z)
+            )
+            # Drop entries older than the settle window
+            while tcp_history and (sim_elapsed - tcp_history[0][0]) > self._settled_window_s:
+                tcp_history.popleft()
+
+            # Only check stillness once we have a full window and ACT has had
+            # time to start moving (min_approach guard avoids firing on the
+            # initial pre-motion frames).
+            disp = None
+            if (sim_elapsed >= self._min_approach_s
+                    and len(tcp_history) >= 2
+                    and (tcp_history[-1][0] - tcp_history[0][0]) >= self._settled_window_s * 0.9):
+                xs = [e[1] for e in tcp_history]
+                ys = [e[2] for e in tcp_history]
+                zs = [e[3] for e in tcp_history]
+                disp = max(max(xs) - min(xs),
+                           max(ys) - min(ys),
+                           max(zs) - min(zs))
+                if disp < self._settled_disp_m:
+                    handoff_tcp = obs.controller_state.tcp_pose
+                    reason = "settled"
+                    self.get_logger().info(
+                        f"[handoff] TCP settled at iter={iter_count} "
+                        f"disp={disp*1000:.2f}mm over {self._settled_window_s}s "
+                        f"fz={fz:.2f}N "
+                        f"tcp=({handoff_tcp.position.x:.3f},"
+                        f"{handoff_tcp.position.y:.3f},"
+                        f"{handoff_tcp.position.z:.3f})"
+                    )
+                    break
 
             if iter_count % 25 == 0 and baseline_fz is not None:
+                disp_str = f"{disp*1000:.2f}mm" if disp is not None else "n/a"
                 self.get_logger().info(
-                    f"[approach] iter={iter_count} fz={fz:.2f}N "
-                    f"df={abs(fz - baseline_fz):.2f}N "
-                    f"(baseline={baseline_fz:.2f}N, threshold={self._force_threshold:.2f}N)"
+                    f"[approach] iter={iter_count} sim={sim_elapsed:.1f}s "
+                    f"disp_{self._settled_window_s:g}s={disp_str} "
+                    f"fz={fz:.2f}N df={abs(fz - baseline_fz):.2f}N"
                 )
 
             send_feedback("approaching...")
@@ -245,7 +279,7 @@ class RunACTThenInsert(Policy):
         return {
             "tcp": handoff_tcp,
             "baseline_fz": baseline_fz if baseline_fz is not None else 0.0,
-            "contact_fz": contact_fz,
+            "contact_fz": None,
             "reason": reason or "unknown",
         }
 
@@ -450,7 +484,7 @@ class RunACTThenInsert(Policy):
             f"RunACTThenInsert.insert_cable() task={task}"
         )
 
-        handoff = self._run_act_until_contact(
+        handoff = self._run_act_until_settled(
             task, get_observation, move_robot, send_feedback
         )
         if handoff is None:
