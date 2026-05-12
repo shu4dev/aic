@@ -144,6 +144,45 @@ def _rot6d_to_quat_xyzw(r1, r2):
     return q / np.linalg.norm(q)
 
 
+# UR-style joint order, used to extract the 6-dof joint vector from an
+# Observation message (which has positions in JointState name-order).
+_UR_JOINT_NAMES = [
+    "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+    "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+]
+
+
+def _joint_positions_from_obs(obs_msg):
+    """Extract the 6-dof joint position vector from an Observation message."""
+    name_to_pos = dict(zip(obs_msg.joint_states.name, obs_msg.joint_states.position))
+    return [name_to_pos.get(jn, 0.0) for jn in _UR_JOINT_NAMES]
+
+
+def _quaternion_slerp_xyzw(q0, q1, t):
+    """Slerp from q0 to q1 with t in [0, 1]. Inputs are [x, y, z, w] arrays.
+
+    Used by _act_step's cartesian_pose mode to interpolate the gripper
+    orientation toward the predicted target by ACT_SPEED_FACTOR.
+    """
+    q0 = np.asarray(q0, dtype=np.float64)
+    q1 = np.asarray(q1, dtype=np.float64)
+    dot = float(np.dot(q0, q1))
+    # Shortest-path: flip q1 if it's on the opposite hemisphere.
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    # Near-parallel: lerp + renormalize is numerically safer than slerp.
+    if dot > 0.9995:
+        out = q0 + t * (q1 - q0)
+        return out / np.linalg.norm(out)
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin_theta_0 = np.sin(theta_0)
+    theta = theta_0 * t
+    s0 = np.sin(theta_0 - theta) / sin_theta_0
+    s1 = np.sin(theta) / sin_theta_0
+    return s0 * q0 + s1 * q1
+
+
 class RunACT(Policy):
     """ACT (Action Chunking Transformer) inference policy for cable insertion.
 
@@ -327,6 +366,38 @@ class RunACT(Policy):
         # Default 0.25 → 288x256, matching the v3 (exp29-clean) training resolution.
         self.image_scaling = float(os.environ.get("ACT_IMAGE_SCALING", "0.25"))
 
+        # Per-step motion scale applied in _act_step before dispatch.
+        # 1.0 reproduces the model's commanded action verbatim. <1.0 slows
+        # all motion uniformly by interpolating from current state toward
+        # the predicted target (for absolute-target modes) or by scaling
+        # the delta directly (for twist-delta mode). 0.0 freezes the robot.
+        # Values >1.0 amplify and are off-distribution.
+        self._speed_factor = float(os.environ.get("ACT_SPEED_FACTOR", "1.0"))
+        if self._speed_factor != 1.0:
+            self.get_logger().info(
+                f"[ACT] ACT_SPEED_FACTOR={self._speed_factor} "
+                f"(per-step motion scaling enabled)"
+            )
+
+        # Approach-quality eval. When EVAL_GT_LOG=1 the policy looks up the
+        # port + plug TFs at runtime and logs a multi-component alignment
+        # report ([eval] xy=... z=... tilt=... dist=... READY/NOT_READY).
+        # Requires launching with ground_truth:=true so the scoring TFs are
+        # relayed to /tf. Off by default — production runs unchanged.
+        self._eval_gt_log = os.environ.get("EVAL_GT_LOG", "0") == "1"
+        self._eval_xy_ok_m = float(os.environ.get("EVAL_XY_OK_MM", "1.5")) / 1000.0
+        self._eval_z_ok_m = float(os.environ.get("EVAL_Z_OK_MM", "10.0")) / 1000.0
+        self._eval_tilt_ok_deg = float(os.environ.get("EVAL_TILT_OK_DEG", "5.0"))
+        self._eval_tf_warned = False
+        if self._eval_gt_log:
+            self.get_logger().info(
+                f"[ACT] EVAL_GT_LOG=1 "
+                f"(xy_ok={self._eval_xy_ok_m*1000:.1f}mm "
+                f"z_ok={self._eval_z_ok_m*1000:.1f}mm "
+                f"tilt_ok={self._eval_tilt_ok_deg:.1f}°) "
+                f"— requires ground_truth:=true at launch"
+            )
+
         self.get_logger().info("Normalization statistics loaded successfully.")
 
     @staticmethod
@@ -438,14 +509,7 @@ class RunACT(Policy):
         #   - "joints" (6D): joint positions only
         #   - "full" (31D): tcp_pose (7) + tcp_velocity (6) + tcp_error (6)
         #                   + joint_positions (6) + wrench (6)
-        joint_positions = [
-            dict(zip(obs_msg.joint_states.name,
-                     obs_msg.joint_states.position)).get(jn, 0.0)
-            for jn in [
-                "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-                "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
-            ]
-        ]
+        joint_positions = _joint_positions_from_obs(obs_msg)
 
         if self.obs_state_mode == "joints":
             state_np = np.array(joint_positions, dtype=np.float32)
@@ -572,6 +636,90 @@ class RunACT(Policy):
             self.get_logger().warn(f"[joints_port] failed to look up port_entrance: {e}")
             return (0.0, 0.0, 0.0)
 
+    def _eval_alignment(self, task, label: str):
+        """Log a multi-component alignment report for approach quality eval.
+
+        Reads ground-truth port + plug TFs (requires launching with
+        ground_truth:=true). Computes lateral XY offset, signed Z gap,
+        tilt angle between plug and port insertion axes, and a "ready to
+        insert" verdict against EVAL_*_OK_* thresholds. One INFO line per
+        call with prefix [eval]. Returns the metrics dict or None on TF
+        failure (silently after the first warning).
+        """
+        if not self._eval_gt_log:
+            return None
+        port_frame = f"task_board/{task.target_module_name}/{task.port_name}_link"
+        plug_frame = f"{task.cable_name}/{task.plug_name}_link"
+        try:
+            from rclpy.time import Time
+            port_tr = self._parent_node._tf_buffer.lookup_transform(
+                "base_link", port_frame, Time()
+            ).transform
+            plug_tr = self._parent_node._tf_buffer.lookup_transform(
+                "base_link", plug_frame, Time()
+            ).transform
+        except Exception as e:
+            if not self._eval_tf_warned:
+                self._eval_tf_warned = True
+                self.get_logger().warn(
+                    f"[eval] TF lookup failed (port={port_frame}, plug={plug_frame}): {e}. "
+                    f"Launch with ground_truth:=true to enable EVAL_GT_LOG."
+                )
+            return None
+
+        pp = port_tr.translation
+        lp = plug_tr.translation
+        dx, dy, dz = lp.x - pp.x, lp.y - pp.y, lp.z - pp.z
+        xy_mm = float(np.sqrt(dx * dx + dy * dy)) * 1000.0
+        z_gap_mm = float(dz) * 1000.0
+        dist_mm = float(np.sqrt(dx * dx + dy * dy + dz * dz)) * 1000.0
+
+        # Local Z axis of each frame in base_link, derived from the
+        # rotation matrix's 3rd column. For quat [x,y,z,w]:
+        #   z_axis = (2(xz+yw), 2(yz-xw), 1 - 2(x²+y²))
+        def _local_z(rot):
+            x, y, z, w = rot.x, rot.y, rot.z, rot.w
+            return np.array(
+                [2.0 * (x * z + y * w),
+                 2.0 * (y * z - x * w),
+                 1.0 - 2.0 * (x * x + y * y)],
+                dtype=np.float64,
+            )
+
+        z_port = _local_z(port_tr.rotation)
+        z_plug = _local_z(plug_tr.rotation)
+        cos_t = float(np.clip(np.dot(z_port, z_plug), -1.0, 1.0))
+        tilt_deg = float(np.degrees(np.arccos(cos_t)))
+
+        xy_ok = xy_mm < self._eval_xy_ok_m * 1000.0
+        z_ok = 0.0 < z_gap_mm < self._eval_z_ok_m * 1000.0
+        tilt_ok = tilt_deg < self._eval_tilt_ok_deg
+        ready = xy_ok and z_ok and tilt_ok
+        if ready:
+            verdict = "READY"
+        else:
+            reasons = []
+            if not xy_ok:
+                reasons.append("xy_high")
+            if not z_ok:
+                reasons.append("z_high" if z_gap_mm >= self._eval_z_ok_m * 1000.0 else "z_below_port")
+            if not tilt_ok:
+                reasons.append("tilt_high")
+            verdict = f"NOT_READY ({', '.join(reasons)})"
+
+        self.get_logger().info(
+            f"[eval] {label}: "
+            f"xy={xy_mm:6.2f}mm z={z_gap_mm:+7.2f}mm tilt={tilt_deg:5.1f}° "
+            f"dist={dist_mm:7.2f}mm  {verdict}"
+        )
+        return {
+            "xy_mm": xy_mm,
+            "z_gap_mm": z_gap_mm,
+            "tilt_deg": tilt_deg,
+            "dist_mm": dist_mm,
+            "ready": ready,
+        }
+
     def insert_cable(
         self,
         task: Task,
@@ -623,6 +771,7 @@ class RunACT(Policy):
             f"temporal_ensemble={'%.3f' % te_coeff if use_temporal_ensemble else 'off'} "
             f"reset_every={RESET_EVERY if not use_temporal_ensemble else 'N/A'}"
         )
+        self._eval_alignment(task, "start")
 
         # Optional video recording: set ACT_VIDEO_DIR to enable.
         # Writes center camera footage (downsampled to match training input)
@@ -736,6 +885,8 @@ class RunACT(Policy):
                     f"norm={np.round(norm_act_np, 3)} "
                     f"raw={np.round(action, 4)}"
                 )
+            if iter_count % 25 == 0:
+                self._eval_alignment(task, f"iter={iter_count}")
             send_feedback("in progress...")
 
             iter_count += 1
@@ -752,6 +903,7 @@ class RunACT(Policy):
             f"RunACT.insert_cable() exiting after {iter_count} iterations "
             f"({elapsed_sim_s:.1f}s sim)..."
         )
+        self._eval_alignment(task, "final")
         return True
 
     def _act_step(self, observation_msg, move_robot):
@@ -774,27 +926,54 @@ class RunACT(Policy):
         action = raw_action_tensor[0].cpu().numpy()
         norm_act_np = normalized_action[0].cpu().numpy()
 
+        # ACT_SPEED_FACTOR scaling. speed==1.0 reproduces the model's action
+        # verbatim; <1.0 interpolates current→predicted (absolute modes) or
+        # scales the delta (twist mode). See module-level docstring.
+        speed = self._speed_factor
+
         if self.action_mode == "joint":
-            joint_update = self._make_joint_motion_update(action)
+            predicted_q = np.asarray(action[:6], dtype=np.float64)
+            if speed == 1.0:
+                target_q = predicted_q
+            else:
+                current_q = np.asarray(
+                    _joint_positions_from_obs(observation_msg), dtype=np.float64
+                )
+                target_q = current_q + speed * (predicted_q - current_q)
+            joint_update = self._make_joint_motion_update(target_q)
             move_robot(joint_motion_update=joint_update)
         elif self.action_mode == "cartesian_pose":
-            x, y, z = float(action[0]), float(action[1]), float(action[2])
-            qxyzw = _rot6d_to_quat_xyzw(action[3:6], action[6:9])
+            px, py, pz = float(action[0]), float(action[1]), float(action[2])
+            pq = np.asarray(_rot6d_to_quat_xyzw(action[3:6], action[6:9]),
+                            dtype=np.float64)
+            if speed == 1.0:
+                tx, ty, tz = px, py, pz
+                tq = pq
+            else:
+                cx, cy, cz = tcp.position.x, tcp.position.y, tcp.position.z
+                cq = np.array([tcp.orientation.x, tcp.orientation.y,
+                               tcp.orientation.z, tcp.orientation.w],
+                              dtype=np.float64)
+                tx = cx + speed * (px - cx)
+                ty = cy + speed * (py - cy)
+                tz = cz + speed * (pz - cz)
+                tq = _quaternion_slerp_xyzw(cq, pq, speed)
             target_pose = Pose(
-                position=Point(x=x, y=y, z=z),
+                position=Point(x=tx, y=ty, z=tz),
                 orientation=Quaternion(
-                    x=float(qxyzw[0]), y=float(qxyzw[1]),
-                    z=float(qxyzw[2]), w=float(qxyzw[3]),
+                    x=float(tq[0]), y=float(tq[1]),
+                    z=float(tq[2]), w=float(tq[3]),
                 ),
             )
             move_robot(motion_update=self._make_pose_motion_update(target_pose))
         else:
+            # Cartesian (twist delta): scale position and rotation deltas
             target_pos = Point(
-                x=tcp.position.x + float(action[0]),
-                y=tcp.position.y + float(action[1]),
-                z=tcp.position.z + float(action[2]),
+                x=tcp.position.x + speed * float(action[0]),
+                y=tcp.position.y + speed * float(action[1]),
+                z=tcp.position.z + speed * float(action[2]),
             )
-            rotvec = action[3:6].astype(np.float64)
+            rotvec = speed * action[3:6].astype(np.float64)
             angle = np.linalg.norm(rotvec)
             if angle > 1e-10:
                 axis = rotvec / angle
