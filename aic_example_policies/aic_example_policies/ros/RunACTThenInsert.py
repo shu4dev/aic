@@ -94,6 +94,11 @@ class RunACTThenInsert(Policy):
         self._settled_window_s = float(os.environ.get("HANDOFF_SETTLED_WINDOW_S", "1.5"))
         self._settled_disp_m = float(os.environ.get("HANDOFF_SETTLED_DISPLACEMENT_M", "0.001"))
         self._min_approach_s = float(os.environ.get("HANDOFF_MIN_APPROACH_S", "3.0"))
+        # Debounce: once stillness is first observed, require it to hold for
+        # this many additional sim seconds before firing handoff. Without
+        # this, the first brief lull between ACT's micro-corrections
+        # triggers handoff before alignment is actually complete.
+        self._handoff_confirm_s = float(os.environ.get("HANDOFF_CONFIRM_S", "1.0"))
         self._handoff_timeout_s = float(os.environ.get("HANDOFF_TIMEOUT_S", "60.0"))
 
         # Phase-2 (descent) knobs
@@ -134,6 +139,7 @@ class RunACTThenInsert(Policy):
             f"[RunACTThenInsert] init: settled_window={self._settled_window_s}s "
             f"settled_disp={self._settled_disp_m*1000:.2f}mm "
             f"min_approach={self._min_approach_s}s "
+            f"confirm={self._handoff_confirm_s}s "
             f"timeout={self._handoff_timeout_s}s max_jams={self._max_jams} "
             f"cable_settle={self._cable_settle_s}s "
             f"k_lat={self._k_lateral} max_lat={self._max_lateral_m*1000:.1f}mm "
@@ -212,6 +218,10 @@ class RunACTThenInsert(Policy):
         reason = None
         iter_count = 0
         last_tcp = None
+        # Debounce: sim time at which the displacement first fell below
+        # threshold. None when stillness is not currently observed. Reset
+        # whenever displacement exceeds threshold again.
+        stillness_first_t = None
 
         send_feedback("Approaching (ACT)...")
         self.get_logger().info(
@@ -219,6 +229,7 @@ class RunACTThenInsert(Policy):
             f"settle window={self._settled_window_s}s "
             f"disp_thresh={self._settled_disp_m*1000:.2f}mm "
             f"min_approach={self._min_approach_s}s "
+            f"confirm={self._handoff_confirm_s}s "
             f"timeout={self._handoff_timeout_s}s "
             f"te={te_coeff_str if use_temporal_ensemble else 'off'}"
         )
@@ -270,8 +281,12 @@ class RunACTThenInsert(Policy):
 
             # Only check stillness once we have a full window and ACT has had
             # time to start moving (min_approach guard avoids firing on the
-            # initial pre-motion frames).
+            # initial pre-motion frames). Once displacement drops below
+            # threshold, require it to stay there for HANDOFF_CONFIRM_S more
+            # sim seconds before firing — debounces against brief lulls
+            # between ACT's micro-corrections during fine alignment.
             disp = None
+            confirm_elapsed = 0.0
             if (sim_elapsed >= self._min_approach_s
                     and len(tcp_history) >= 2
                     and (tcp_history[-1][0] - tcp_history[0][0]) >= self._settled_window_s * 0.9):
@@ -282,23 +297,48 @@ class RunACTThenInsert(Policy):
                            max(ys) - min(ys),
                            max(zs) - min(zs))
                 if disp < self._settled_disp_m:
-                    handoff_tcp = obs.controller_state.tcp_pose
-                    reason = "settled"
-                    self.get_logger().info(
-                        f"[handoff] TCP settled at iter={iter_count} "
-                        f"disp={disp*1000:.2f}mm over {self._settled_window_s}s "
-                        f"fz={fz:.2f}N "
-                        f"tcp=({handoff_tcp.position.x:.3f},"
-                        f"{handoff_tcp.position.y:.3f},"
-                        f"{handoff_tcp.position.z:.3f})"
-                    )
-                    break
+                    if stillness_first_t is None:
+                        stillness_first_t = sim_elapsed
+                        self.get_logger().info(
+                            f"[approach] stillness first observed at "
+                            f"sim={sim_elapsed:.1f}s disp={disp*1000:.2f}mm "
+                            f"(confirming for {self._handoff_confirm_s}s)"
+                        )
+                    confirm_elapsed = sim_elapsed - stillness_first_t
+                    if confirm_elapsed >= self._handoff_confirm_s:
+                        handoff_tcp = obs.controller_state.tcp_pose
+                        reason = "settled"
+                        self.get_logger().info(
+                            f"[handoff] TCP settled at iter={iter_count} "
+                            f"disp={disp*1000:.2f}mm over {self._settled_window_s}s "
+                            f"(held {confirm_elapsed:.1f}s ≥ {self._handoff_confirm_s}s) "
+                            f"fz={fz:.2f}N "
+                            f"tcp=({handoff_tcp.position.x:.3f},"
+                            f"{handoff_tcp.position.y:.3f},"
+                            f"{handoff_tcp.position.z:.3f})"
+                        )
+                        break
+                else:
+                    if stillness_first_t is not None:
+                        held_for = sim_elapsed - stillness_first_t
+                        self.get_logger().info(
+                            f"[approach] stillness broken at sim={sim_elapsed:.1f}s "
+                            f"after holding {held_for:.2f}s "
+                            f"(disp={disp*1000:.2f}mm)"
+                        )
+                    stillness_first_t = None
 
             if iter_count % 25 == 0 and baseline_fz is not None:
                 disp_str = f"{disp*1000:.2f}mm" if disp is not None else "n/a"
+                confirm_str = (
+                    f"confirm={confirm_elapsed:.1f}/{self._handoff_confirm_s:.1f}s"
+                    if stillness_first_t is not None
+                    else "confirm=off"
+                )
                 self.get_logger().info(
                     f"[approach] iter={iter_count} sim={sim_elapsed:.1f}s "
                     f"disp_{self._settled_window_s:g}s={disp_str} "
+                    f"{confirm_str} "
                     f"fz={fz:.2f}N df={abs(fz - baseline_fz):.2f}N"
                 )
 
