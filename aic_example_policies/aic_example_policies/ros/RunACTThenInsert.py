@@ -104,19 +104,52 @@ class RunACTThenInsert(Policy):
         self._spiral_max_r = float(os.environ.get("SPIRAL_MAX_R", "0.005"))
         self._max_jams = int(os.environ.get("MAX_JAMS", "5"))
 
+        # Phase-2 round-2 additions: cable-settle pause + wrench-based
+        # lateral compliance (P-only admittance). Compliance replaces
+        # ImprovedCheatCode's plug-TF PI XY-correction; spiral is now gated
+        # so it only engages when the contact gives no directional force.
+        self._cable_settle_s = float(os.environ.get("CABLE_SETTLE_S", "1.5"))
+        self._k_lateral = float(os.environ.get("K_LATERAL", "0.0005"))
+        self._max_lateral_m = float(os.environ.get("MAX_LATERAL_M", "0.005"))
+        self._compliance_dead_band_n = float(
+            os.environ.get("COMPLIANCE_DEAD_BAND_N", "0.5")
+        )
+        self._spiral_force_threshold_n = float(
+            os.environ.get("SPIRAL_FORCE_THRESHOLD_N", "1.0")
+        )
+
+        # Descent progress guard. Without this, the loop can spin forever on
+        # a force-oscillation limit cycle (df hovers near F_soft, step sign
+        # flips each iteration, descent_z never grows, jam threshold never
+        # reached). Track the best descent_z achieved and abort if no new
+        # high in DESCENT_STALL_TIMEOUT_S sim seconds.
+        self._descent_stall_timeout_s = float(
+            os.environ.get("DESCENT_STALL_TIMEOUT_S", "10.0")
+        )
+        self._progress_epsilon_m = float(
+            os.environ.get("PROGRESS_EPSILON_M", "0.0002")
+        )
+
         self.get_logger().info(
             f"[RunACTThenInsert] init: settled_window={self._settled_window_s}s "
             f"settled_disp={self._settled_disp_m*1000:.2f}mm "
             f"min_approach={self._min_approach_s}s "
-            f"timeout={self._handoff_timeout_s}s max_jams={self._max_jams}"
+            f"timeout={self._handoff_timeout_s}s max_jams={self._max_jams} "
+            f"cable_settle={self._cable_settle_s}s "
+            f"k_lat={self._k_lateral} max_lat={self._max_lateral_m*1000:.1f}mm "
+            f"dead_band={self._compliance_dead_band_n}N "
+            f"spiral_force_thresh={self._spiral_force_threshold_n}N "
+            f"stall_timeout={self._descent_stall_timeout_s}s "
+            f"progress_eps={self._progress_epsilon_m*1000:.2f}mm"
         )
 
     # ---------------------------------------------------------------------
     # Force / wrench helpers
     # ---------------------------------------------------------------------
-    def _read_fz(self, obs_msg):
-        """Smoothed |F_z| at this frame's center-camera timestamp. Falls back
-        to the single-sample wrist wrench if the smoother buffer is empty."""
+    def _read_wrench(self, obs_msg):
+        """Smoothed (Fx, Fy, Fz, Tx, Ty, Tz) at this frame's center-camera
+        timestamp. Falls back to the single-sample wrist wrench if the
+        smoother buffer is empty."""
         stamp = obs_msg.center_image.header.stamp
         ref_time = stamp.sec + stamp.nanosec * 1e-9
         smoothed = self._act._wrench_smoother.smoothed(
@@ -124,9 +157,13 @@ class RunACTThenInsert(Policy):
             window_s=self._act._wrench_window_s,
             mode=self._act._wrench_mode,
         )
-        if smoothed is None:
-            return float(obs_msg.wrist_wrench.wrench.force.z)
-        return float(smoothed[2])
+        if smoothed is not None:
+            return tuple(float(x) for x in smoothed)
+        w = obs_msg.wrist_wrench.wrench
+        return (
+            float(w.force.x), float(w.force.y), float(w.force.z),
+            float(w.torque.x), float(w.torque.y), float(w.torque.z),
+        )
 
     # ---------------------------------------------------------------------
     # Phase 1 — ACT approach until trajectory completes (TCP stillness)
@@ -214,7 +251,7 @@ class RunACTThenInsert(Policy):
             self._act._act_step(obs, move_robot)
 
             # --- Diagnostic: track force baseline (not used as a trigger) ---
-            fz = self._read_fz(obs)
+            fz = self._read_wrench(obs)[2]
             if len(baseline_samples) < BASELINE_FRAMES:
                 baseline_samples.append(fz)
                 if len(baseline_samples) == BASELINE_FRAMES:
@@ -284,14 +321,46 @@ class RunACTThenInsert(Policy):
         }
 
     # ---------------------------------------------------------------------
-    # Phase 2 — Force-controlled descent + spiral search
+    # Phase 1b — Cable-settle pause (between handoff and descent)
+    # ---------------------------------------------------------------------
+    def _cable_settle_pause(self, handoff_state, move_robot):
+        """Hold the handoff TCP pose for CABLE_SETTLE_S seconds.
+
+        Mirrors ImprovedCheatCode's settle pause (lines 297-318): ACT's
+        approach can excite the cable's swing momentum (20-segment ball-joint
+        model, damping=0.2, zero spring stiffness); if descent begins
+        immediately, that residual swing drags the plug laterally. A short
+        firm hold dissipates it.
+        """
+        if self._cable_settle_s <= 0.0:
+            return
+        anchor = handoff_state["tcp"]
+        stiffness = [self._descent_stiffness_xy] * 3 + [150.0, 150.0, 150.0]
+        damping = [200.0, 200.0, 200.0, 60.0, 60.0, 60.0]
+        n_iters = max(1, int(self._cable_settle_s / 0.04))
+        self.get_logger().info(
+            f"[settle] holding handoff pose for {self._cable_settle_s:.2f}s "
+            f"({n_iters} iters) "
+            f"tcp=({anchor.position.x:.3f},{anchor.position.y:.3f},{anchor.position.z:.3f})"
+        )
+        for _ in range(n_iters):
+            self.set_pose_target(
+                move_robot=move_robot,
+                pose=anchor,
+                stiffness=stiffness,
+                damping=damping,
+            )
+            self.sleep_for(0.04)
+
+    # ---------------------------------------------------------------------
+    # Phase 2 — Force-controlled descent + lateral compliance + spiral search
     # ---------------------------------------------------------------------
     def _scripted_descent(self, handoff_state, task, get_observation,
                           move_robot, send_feedback):
-        """Descent + spiral search anchored on the handoff TCP pose.
-
-        Uses TCP pose + wrench only (no ground-truth TF). Returns the final
-        descent distance reached.
+        """Descent anchored on the handoff TCP pose. Uses TCP pose + wrench
+        only (no ground-truth TF). Lateral correction is a P-only admittance
+        on (Fx, Fy); spiral search engages only when the contact gives no
+        directional force. Returns the final descent distance reached.
         """
         params = CONNECTOR_PARAMS.get(task.plug_type, DEFAULT_PARAMS)
         anchor = handoff_state["tcp"]
@@ -314,6 +383,11 @@ class RunACTThenInsert(Policy):
         resume_count = 0
         prev_tcp_z = anchor.position.z
         iter_count = 0
+        # Progress guard: track the best actual TCP descent and the sim time
+        # of the last "new high" so we can abort if descent stalls without
+        # tripping the force_limit-based jam detector.
+        best_actual_z = 0.0
+        last_progress_t = self.time_now()
 
         stiffness = [self._descent_stiffness_xy] * 3 + [150.0, 150.0, 150.0]
         damping = [200.0, 200.0, 200.0, 60.0, 60.0, 60.0]
@@ -325,8 +399,9 @@ class RunACTThenInsert(Policy):
                 break
 
             tcp = obs.controller_state.tcp_pose
-            fz = self._read_fz(obs)
+            fx, fy, fz = self._read_wrench(obs)[:3]
             df = abs(fz - baseline_fz)
+            f_xy_mag = math.sqrt(fx * fx + fy * fy)
 
             # 1. Force-modulated step size (ImprovedCheatCode formula)
             base_step = (params["coarse_step"]
@@ -346,15 +421,57 @@ class RunACTThenInsert(Policy):
             dz_actual = prev_tcp_z - tcp.position.z
             prev_tcp_z = tcp.position.z
 
-            # 3. Stall detection — engages spiral if descent isn't progressing
+            # 2b. Progress guard. Track the deepest TCP descent reached and
+            # abort if no new high is set within DESCENT_STALL_TIMEOUT_S.
+            # Catches force-oscillation limit cycles and compliance-masked
+            # stalls — neither trips the force_limit-based jam detector.
+            actual_descent = anchor.position.z - tcp.position.z
+            if actual_descent > best_actual_z + self._progress_epsilon_m:
+                best_actual_z = actual_descent
+                last_progress_t = self.time_now()
+            else:
+                stalled_for = (self.time_now() - last_progress_t).nanoseconds * 1e-9
+                if stalled_for > self._descent_stall_timeout_s:
+                    self.get_logger().warn(
+                        f"[descent] no progress for {stalled_for:.1f}s "
+                        f"(best_actual={best_actual_z*1000:.2f}mm, "
+                        f"commanded_z={descent_z*1000:.2f}mm, "
+                        f"df={df:.1f}N), aborting"
+                    )
+                    break
+
+            # 3. Lateral compliance (P-only admittance on Fx, Fy).
+            #    Dead-band suppresses sensor-noise drift. Circular saturation
+            #    bounds the offset like ImprovedCheatCode's max_windup.
+            if f_xy_mag < self._compliance_dead_band_n:
+                comply_dx, comply_dy = 0.0, 0.0
+            else:
+                db_scale = (f_xy_mag - self._compliance_dead_band_n) / f_xy_mag
+                fx_eff = fx * db_scale
+                fy_eff = fy * db_scale
+                comply_dx = -self._k_lateral * fx_eff
+                comply_dy = -self._k_lateral * fy_eff
+                cmag = math.sqrt(comply_dx * comply_dx + comply_dy * comply_dy)
+                if cmag > self._max_lateral_m:
+                    sat = self._max_lateral_m / cmag
+                    comply_dx *= sat
+                    comply_dy *= sat
+
+            # 4. Stall detection. Spiral is gated on small |F_xy| — when the
+            #    contact gives no directional force, compliance has nothing
+            #    to act on and blind spiral search is the only fallback.
             stalled = (df > F_ref) and (dz_actual < 0.3 * base_step)
+            no_lateral_signal = f_xy_mag < self._spiral_force_threshold_n
             if stalled:
                 stall_count += 1
-                if stall_count > 5 and not spiral_active:
+                if (stall_count > 5
+                        and not spiral_active
+                        and no_lateral_signal):
                     spiral_active = True
                     spiral_t = 0.0
                     self.get_logger().info(
-                        f"[descent] spiral search engaged at z={descent_z*1000:.2f}mm"
+                        f"[descent] spiral engaged at z={descent_z*1000:.2f}mm "
+                        f"|F_xy|={f_xy_mag:.2f}N (no directional signal)"
                     )
             else:
                 if spiral_active:
@@ -369,7 +486,7 @@ class RunACTThenInsert(Policy):
                 else:
                     stall_count = max(0, stall_count - 1)
 
-            # 4. Jam detection — retreat and count
+            # 5. Jam detection — retreat and count
             if df > params["force_limit"] and dz_actual < 0.3 * base_step:
                 consecutive_jams += 1
                 self.get_logger().warn(
@@ -384,7 +501,7 @@ class RunACTThenInsert(Policy):
             elif df < params["force_limit"] * 0.3:
                 consecutive_jams = max(0, consecutive_jams - 1)
 
-            # 5. Advance descent depth
+            # 6. Advance descent depth
             descent_z += step
             if descent_z >= params["max_depth"]:
                 self.get_logger().info(
@@ -394,21 +511,22 @@ class RunACTThenInsert(Policy):
             if descent_z < 0.0:
                 descent_z = 0.0
 
-            # 6. Spiral overlay (active only when stalled)
-            dx, dy, r_now = 0.0, 0.0, 0.0
+            # 7. Spiral overlay (active only when stalled AND no force signal)
+            spiral_dx, spiral_dy, r_now = 0.0, 0.0, 0.0
             if spiral_active:
                 spiral_t += DT
                 r_now = min(self._spiral_max_r,
                             self._spiral_r0 + self._spiral_rate * spiral_t)
                 theta = 2.0 * math.pi * self._spiral_freq * spiral_t
-                dx = r_now * math.cos(theta)
-                dy = r_now * math.sin(theta)
+                spiral_dx = r_now * math.cos(theta)
+                spiral_dy = r_now * math.sin(theta)
 
-            # 7. Build target pose and dispatch
+            # 8. Build target pose and dispatch.
+            #    target = anchor + lateral_compliance + spiral_overlay - descent_z
             target = Pose(
                 position=Point(
-                    x=anchor.position.x + dx,
-                    y=anchor.position.y + dy,
+                    x=anchor.position.x + comply_dx + spiral_dx,
+                    y=anchor.position.y + comply_dy + spiral_dy,
                     z=anchor.position.z - descent_z,
                 ),
                 orientation=anchor.orientation,
@@ -424,7 +542,11 @@ class RunACTThenInsert(Policy):
                 self.get_logger().info(
                     f"[descent] z={descent_z*1000:.2f}mm df={df:.1f}N "
                     f"dz={dz_actual*1000:.3f}mm step={step*1000:.3f}mm "
-                    f"spiral_r={r_now*1000:.2f}mm jams={consecutive_jams}"
+                    f"|F_xy|={f_xy_mag:.2f}N "
+                    f"comply=({comply_dx*1000:+.2f},{comply_dy*1000:+.2f})mm "
+                    f"spiral_r={r_now*1000:.2f}mm "
+                    f"spiral={'Y' if spiral_active else 'N'} "
+                    f"jams={consecutive_jams}"
                 )
 
             send_feedback("inserting...")
@@ -490,6 +612,8 @@ class RunACTThenInsert(Policy):
         if handoff is None:
             self.get_logger().warn("ACT phase aborted (no observation)")
             return False
+
+        self._cable_settle_pause(handoff, move_robot)
 
         self._scripted_descent(
             handoff, task, get_observation, move_robot, send_feedback
