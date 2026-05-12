@@ -1,0 +1,466 @@
+#
+#  Copyright (C) 2026 Intrinsic Innovation LLC
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+"""Hybrid policy: ACT for approach, classical force-feedback descent + spiral search.
+
+Design intent: the trained ACT policy reliably approaches the port but was not
+trained to descend and insert. Rather than retraining, this policy runs ACT
+inference until a contact force is detected on the FT sensor, then hands off to
+a classical (model-free) controller for descent and insertion.
+
+Phases:
+  1. ACT approach — runs RunACT inference per-step; monitors smoothed |F_z|
+     against a baseline measured in the first 10 iterations. Handoff when
+     df > HANDOFF_FORCE_THRESHOLD for HANDOFF_CONFIRM_FRAMES consecutive frames,
+     or when HANDOFF_TIMEOUT_S sim seconds have elapsed.
+
+  2. Force-controlled descent + spiral search — anchored at the TCP pose
+     captured at handoff (NOT a TF lookup of the plug, so the controller is
+     transferable to real hardware). Per-connector params (SFP / SC) lifted
+     from ImprovedCheatCode. Spiral overlay engages when descent stalls.
+     Jam detection retreats and aborts after MAX_JAMS consecutive jams.
+
+  3. Stabilize + joint-space hold — mirrors ImprovedCheatCode's end-of-trial
+     pattern to prevent drift before lifecycle deactivation.
+"""
+
+import math
+import os
+
+import numpy as np
+from geometry_msgs.msg import Point, Pose
+from trajectory_msgs.msg import JointTrajectoryPoint
+
+from aic_control_interfaces.msg import (
+    JointMotionUpdate,
+    TrajectoryGenerationMode,
+)
+from aic_model.policy import (
+    GetObservationCallback,
+    MoveRobotCallback,
+    Policy,
+    SendFeedbackCallback,
+)
+from aic_task_interfaces.msg import Task
+
+from .RunACT import RunACT
+
+
+# Per-connector descent params (lifted from ImprovedCheatCode.CONNECTOR_PARAMS).
+# max_depth here is the descent distance from the handoff TCP (positive).
+CONNECTOR_PARAMS = {
+    "sfp": {
+        "max_depth": 0.022,
+        "coarse_step": 0.0012,
+        "fine_step": 0.0003,
+        "fine_threshold": 0.01,
+        "force_limit": 15.0,
+        "force_ref": 4.0,
+        "force_soft": 8.0,
+    },
+    "sc": {
+        "max_depth": 0.035,
+        "coarse_step": 0.0005,
+        "fine_step": 0.0003,
+        "fine_threshold": 0.008,
+        "force_limit": 12.0,
+        "force_ref": 3.5,
+        "force_soft": 7.0,
+    },
+}
+DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
+
+
+class RunACTThenInsert(Policy):
+    def __init__(self, parent_node):
+        super().__init__(parent_node)
+        # Composition: instantiate RunACT internally. This triggers ACT's
+        # heavy imports (torch, lerobot, cv2) and loads the checkpoint exactly
+        # once, before aic_engine activates the lifecycle.
+        self._act = RunACT(parent_node)
+
+        # Phase-1 (handoff) knobs
+        self._force_threshold = float(os.environ.get("HANDOFF_FORCE_THRESHOLD", "3.0"))
+        self._confirm_frames = int(os.environ.get("HANDOFF_CONFIRM_FRAMES", "3"))
+        self._handoff_timeout_s = float(os.environ.get("HANDOFF_TIMEOUT_S", "60.0"))
+
+        # Phase-2 (descent) knobs
+        self._descent_stiffness_xy = float(os.environ.get("DESCENT_STIFFNESS_XY", "400.0"))
+        self._spiral_r0 = float(os.environ.get("SPIRAL_R0", "0.0005"))
+        self._spiral_rate = float(os.environ.get("SPIRAL_RATE", "0.0003"))
+        self._spiral_freq = float(os.environ.get("SPIRAL_FREQ", "0.5"))
+        self._spiral_max_r = float(os.environ.get("SPIRAL_MAX_R", "0.005"))
+        self._max_jams = int(os.environ.get("MAX_JAMS", "5"))
+
+        self.get_logger().info(
+            f"[RunACTThenInsert] init: handoff_threshold={self._force_threshold}N "
+            f"confirm_frames={self._confirm_frames} timeout={self._handoff_timeout_s}s "
+            f"max_jams={self._max_jams}"
+        )
+
+    # ---------------------------------------------------------------------
+    # Force / wrench helpers
+    # ---------------------------------------------------------------------
+    def _read_fz(self, obs_msg):
+        """Smoothed |F_z| at this frame's center-camera timestamp. Falls back
+        to the single-sample wrist wrench if the smoother buffer is empty."""
+        stamp = obs_msg.center_image.header.stamp
+        ref_time = stamp.sec + stamp.nanosec * 1e-9
+        smoothed = self._act._wrench_smoother.smoothed(
+            ref_time,
+            window_s=self._act._wrench_window_s,
+            mode=self._act._wrench_mode,
+        )
+        if smoothed is None:
+            return float(obs_msg.wrist_wrench.wrench.force.z)
+        return float(smoothed[2])
+
+    # ---------------------------------------------------------------------
+    # Phase 1 — ACT approach with contact monitor
+    # ---------------------------------------------------------------------
+    def _run_act_until_contact(self, task, get_observation, move_robot, send_feedback):
+        """Run ACT inference loop, breaking on contact force or timeout.
+
+        Returns dict {tcp, baseline_fz, contact_fz, reason} or None if no
+        observation ever arrived.
+        """
+        # Mirror RunACT.insert_cable's loop scaffolding so the ACT behaviour
+        # during this phase is identical to running RunACT standalone.
+        CONTROL_HZ = float(os.environ.get("ACT_CONTROL_HZ", "20.0"))
+        CONTROL_DT = 1.0 / CONTROL_HZ
+        RESET_EVERY = int(os.environ.get("ACT_RESET_EVERY", "10"))
+
+        te_coeff_str = os.environ.get("ACT_TEMPORAL_ENSEMBLE", "0.1")
+        use_temporal_ensemble = te_coeff_str not in ("", "off", "0")
+        if use_temporal_ensemble:
+            te_coeff = float(te_coeff_str)
+            if self._act.policy.config.temporal_ensemble_coeff is None:
+                self._act.policy.config.temporal_ensemble_coeff = te_coeff
+                self._act.policy.config.n_action_steps = 1
+                from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
+                self._act.policy.temporal_ensembler = ACTTemporalEnsembler(
+                    te_coeff, self._act.policy.config.chunk_size
+                )
+
+        # Reset ACT per-trial state (mirrors what RunACT.insert_cable does).
+        self._act.policy.reset()
+        self._act._port_entrance_baselink = None
+        self._act._current_task = task
+
+        BASELINE_FRAMES = 10
+        baseline_samples = []
+        baseline_fz = None
+        above_thresh = 0
+        handoff_tcp = None
+        contact_fz = None
+        reason = None
+        iter_count = 0
+        last_tcp = None
+
+        send_feedback("Approaching (ACT)...")
+        self.get_logger().info(
+            f"[approach] starting ACT phase, timeout={self._handoff_timeout_s}s "
+            f"te={te_coeff_str if use_temporal_ensemble else 'off'}"
+        )
+
+        start_sim = self.time_now()
+        while True:
+            sim_elapsed = (self.time_now() - start_sim).nanoseconds * 1e-9
+            if sim_elapsed >= self._handoff_timeout_s:
+                reason = "timeout"
+                self.get_logger().warn(
+                    f"[handoff] timeout at sim={sim_elapsed:.1f}s "
+                    f"(no contact ≥ {self._force_threshold}N detected)"
+                )
+                break
+
+            loop_start = self.time_now()
+            obs = get_observation()
+            if obs is None:
+                self.get_logger().info("[approach] no observation, aborting")
+                return None
+            last_tcp = obs.controller_state.tcp_pose
+
+            # Periodic chunk reset (only when TE is off)
+            if (not use_temporal_ensemble
+                    and iter_count > 0
+                    and iter_count % RESET_EVERY == 0):
+                self._act.policy.reset()
+
+            # ACT inference + dispatch (move_robot called inside _act_step)
+            self._act._act_step(obs, move_robot)
+
+            # Contact check
+            fz = self._read_fz(obs)
+            if len(baseline_samples) < BASELINE_FRAMES:
+                baseline_samples.append(fz)
+                if len(baseline_samples) == BASELINE_FRAMES:
+                    baseline_fz = sum(baseline_samples) / BASELINE_FRAMES
+                    self.get_logger().info(
+                        f"[approach] baseline_fz={baseline_fz:.2f}N (n={BASELINE_FRAMES})"
+                    )
+            elif baseline_fz is not None:
+                df = abs(fz - baseline_fz)
+                if df > self._force_threshold:
+                    above_thresh += 1
+                    if above_thresh >= self._confirm_frames:
+                        handoff_tcp = obs.controller_state.tcp_pose
+                        contact_fz = fz
+                        reason = "contact"
+                        self.get_logger().info(
+                            f"[handoff] contact at iter={iter_count} fz={fz:.2f}N "
+                            f"baseline={baseline_fz:.2f}N df={df:.2f}N "
+                            f"tcp=({handoff_tcp.position.x:.3f},"
+                            f"{handoff_tcp.position.y:.3f},"
+                            f"{handoff_tcp.position.z:.3f})"
+                        )
+                        break
+                else:
+                    above_thresh = 0
+
+            if iter_count % 25 == 0 and baseline_fz is not None:
+                self.get_logger().info(
+                    f"[approach] iter={iter_count} fz={fz:.2f}N "
+                    f"df={abs(fz - baseline_fz):.2f}N "
+                    f"(baseline={baseline_fz:.2f}N, threshold={self._force_threshold:.2f}N)"
+                )
+
+            send_feedback("approaching...")
+            iter_count += 1
+            elapsed = (self.time_now() - loop_start).nanoseconds * 1e-9
+            self.sleep_for(max(0.0, CONTROL_DT - elapsed))
+
+        # Timeout path: anchor on the last observed TCP.
+        if handoff_tcp is None:
+            handoff_tcp = last_tcp
+            if handoff_tcp is None:
+                return None
+
+        return {
+            "tcp": handoff_tcp,
+            "baseline_fz": baseline_fz if baseline_fz is not None else 0.0,
+            "contact_fz": contact_fz,
+            "reason": reason or "unknown",
+        }
+
+    # ---------------------------------------------------------------------
+    # Phase 2 — Force-controlled descent + spiral search
+    # ---------------------------------------------------------------------
+    def _scripted_descent(self, handoff_state, task, get_observation,
+                          move_robot, send_feedback):
+        """Descent + spiral search anchored on the handoff TCP pose.
+
+        Uses TCP pose + wrench only (no ground-truth TF). Returns the final
+        descent distance reached.
+        """
+        params = CONNECTOR_PARAMS.get(task.plug_type, DEFAULT_PARAMS)
+        anchor = handoff_state["tcp"]
+        baseline_fz = handoff_state["baseline_fz"]
+
+        self.get_logger().info(
+            f"[descent] start plug_type={task.plug_type} "
+            f"max_depth={params['max_depth']*1000:.1f}mm "
+            f"force_ref={params['force_ref']}N force_limit={params['force_limit']}N"
+        )
+        send_feedback("Descending...")
+
+        DT = 0.04  # 25 Hz — matches ImprovedCheatCode's descent cadence
+
+        descent_z = 0.0
+        consecutive_jams = 0
+        stall_count = 0
+        spiral_active = False
+        spiral_t = 0.0
+        resume_count = 0
+        prev_tcp_z = anchor.position.z
+        iter_count = 0
+
+        stiffness = [self._descent_stiffness_xy] * 3 + [150.0, 150.0, 150.0]
+        damping = [200.0, 200.0, 200.0, 60.0, 60.0, 60.0]
+
+        while True:
+            obs = get_observation()
+            if obs is None:
+                self.get_logger().warn("[descent] no observation, aborting")
+                break
+
+            tcp = obs.controller_state.tcp_pose
+            fz = self._read_fz(obs)
+            df = abs(fz - baseline_fz)
+
+            # 1. Force-modulated step size (ImprovedCheatCode formula)
+            base_step = (params["coarse_step"]
+                         if descent_z < params["fine_threshold"]
+                         else params["fine_step"])
+            F_ref = params["force_ref"]
+            F_soft = params["force_soft"]
+            if df <= F_ref:
+                step = base_step
+            elif df < F_soft:
+                scale = max(0.1, 1.0 - (df - F_ref) / (F_soft - F_ref))
+                step = base_step * scale
+            else:
+                step = -0.5 * base_step  # back off
+
+            # 2. Actual Z motion since last iteration (positive = descended)
+            dz_actual = prev_tcp_z - tcp.position.z
+            prev_tcp_z = tcp.position.z
+
+            # 3. Stall detection — engages spiral if descent isn't progressing
+            stalled = (df > F_ref) and (dz_actual < 0.3 * base_step)
+            if stalled:
+                stall_count += 1
+                if stall_count > 5 and not spiral_active:
+                    spiral_active = True
+                    spiral_t = 0.0
+                    self.get_logger().info(
+                        f"[descent] spiral search engaged at z={descent_z*1000:.2f}mm"
+                    )
+            else:
+                if spiral_active:
+                    resume_count += 1
+                    if resume_count >= 3:
+                        self.get_logger().info(
+                            f"[descent] spiral disengaged at z={descent_z*1000:.2f}mm"
+                        )
+                        spiral_active = False
+                        spiral_t = 0.0
+                        resume_count = 0
+                else:
+                    stall_count = max(0, stall_count - 1)
+
+            # 4. Jam detection — retreat and count
+            if df > params["force_limit"] and dz_actual < 0.3 * base_step:
+                consecutive_jams += 1
+                self.get_logger().warn(
+                    f"[descent] JAM df={df:.1f}N dz={dz_actual*1000:.3f}mm "
+                    f"z={descent_z*1000:.2f}mm jams={consecutive_jams}"
+                )
+                descent_z = max(0.0, descent_z - 3 * base_step)
+                if consecutive_jams >= self._max_jams:
+                    self.get_logger().warn("[descent] max jams reached, aborting")
+                    break
+                self.sleep_for(0.1)
+            elif df < params["force_limit"] * 0.3:
+                consecutive_jams = max(0, consecutive_jams - 1)
+
+            # 5. Advance descent depth
+            descent_z += step
+            if descent_z >= params["max_depth"]:
+                self.get_logger().info(
+                    f"[descent] reached max_depth={params['max_depth']*1000:.1f}mm"
+                )
+                break
+            if descent_z < 0.0:
+                descent_z = 0.0
+
+            # 6. Spiral overlay (active only when stalled)
+            dx, dy, r_now = 0.0, 0.0, 0.0
+            if spiral_active:
+                spiral_t += DT
+                r_now = min(self._spiral_max_r,
+                            self._spiral_r0 + self._spiral_rate * spiral_t)
+                theta = 2.0 * math.pi * self._spiral_freq * spiral_t
+                dx = r_now * math.cos(theta)
+                dy = r_now * math.sin(theta)
+
+            # 7. Build target pose and dispatch
+            target = Pose(
+                position=Point(
+                    x=anchor.position.x + dx,
+                    y=anchor.position.y + dy,
+                    z=anchor.position.z - descent_z,
+                ),
+                orientation=anchor.orientation,
+            )
+            self.set_pose_target(
+                move_robot=move_robot,
+                pose=target,
+                stiffness=stiffness,
+                damping=damping,
+            )
+
+            if iter_count % 25 == 0:
+                self.get_logger().info(
+                    f"[descent] z={descent_z*1000:.2f}mm df={df:.1f}N "
+                    f"dz={dz_actual*1000:.3f}mm step={step*1000:.3f}mm "
+                    f"spiral_r={r_now*1000:.2f}mm jams={consecutive_jams}"
+                )
+
+            send_feedback("inserting...")
+            iter_count += 1
+            self.sleep_for(DT)
+
+        return descent_z
+
+    # ---------------------------------------------------------------------
+    # Phase 3 — Stabilize + joint-space hold (from ImprovedCheatCode end)
+    # ---------------------------------------------------------------------
+    def _stabilize_and_hold(self, get_observation, move_robot):
+        """Hold the final Cartesian pose, then switch to joint-space hold."""
+        self.get_logger().info("[stabilize] holding final pose")
+        obs = get_observation()
+        if obs is None:
+            return
+        final_pose = obs.controller_state.tcp_pose
+        for _ in range(20):
+            self.set_pose_target(move_robot=move_robot, pose=final_pose)
+            self.sleep_for(0.04)
+
+        obs = get_observation()
+        if (obs is not None and obs.joint_states is not None
+                and len(obs.joint_states.position) >= 6):
+            joints = list(obs.joint_states.position[:6])
+            self.get_logger().info(
+                f"[end_hold] freezing arm at "
+                f"joints=[{', '.join(f'{j:.3f}' for j in joints)}]"
+            )
+            hold_cmd = JointMotionUpdate(
+                target_state=JointTrajectoryPoint(positions=joints),
+                target_stiffness=[500.0, 500.0, 500.0, 200.0, 200.0, 200.0],
+                target_damping=[40.0, 40.0, 40.0, 15.0, 15.0, 15.0],
+                trajectory_generation_mode=TrajectoryGenerationMode(
+                    mode=TrajectoryGenerationMode.MODE_POSITION,
+                ),
+            )
+            for _ in range(15):
+                move_robot(joint_motion_update=hold_cmd)
+                self.sleep_for(0.04)
+        else:
+            self.get_logger().warn("[end_hold] observation unavailable, skipping")
+
+    # ---------------------------------------------------------------------
+    # Entry point
+    # ---------------------------------------------------------------------
+    def insert_cable(
+        self,
+        task: Task,
+        get_observation: GetObservationCallback,
+        move_robot: MoveRobotCallback,
+        send_feedback: SendFeedbackCallback,
+        **kwargs,
+    ):
+        self.get_logger().info(
+            f"RunACTThenInsert.insert_cable() task={task}"
+        )
+
+        handoff = self._run_act_until_contact(
+            task, get_observation, move_robot, send_feedback
+        )
+        if handoff is None:
+            self.get_logger().warn("ACT phase aborted (no observation)")
+            return False
+
+        self._scripted_descent(
+            handoff, task, get_observation, move_robot, send_feedback
+        )
+        self._stabilize_and_hold(get_observation, move_robot)
+
+        self.get_logger().info("RunACTThenInsert.insert_cable() exiting...")
+        return True

@@ -722,82 +722,20 @@ class RunACT(Policy):
                     f"tcp_err=({err[0]:.4f},{err[1]:.4f},{err[2]:.4f})"
                 )
 
-            obs_tensors = self.prepare_observations(observation_msg)
-
             # Force a fresh chunk periodically so the policy reacts to new
             # observations. Skipped when temporal ensembling is active (it
             # re-runs the model every step internally).
             if not use_temporal_ensemble and iter_count > 0 and iter_count % RESET_EVERY == 0:
                 self.policy.reset()
 
-            # 2. Model Inference
-            with torch.inference_mode():
-                normalized_action = self.policy.select_action(obs_tensors)
-
-            # 3. Un-normalize Action
-            if self.action_norm_mode == "MINMAX":
-                raw_action_tensor = (normalized_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min
-            else:
-                raw_action_tensor = (normalized_action * self.action_std) + self.action_mean
-            action = raw_action_tensor[0].cpu().numpy()
+            action, norm_act_np = self._act_step(observation_msg, move_robot)
 
             if iter_count % 100 == 0:
-                norm_act = normalized_action[0].cpu().numpy()
                 self.get_logger().info(
                     f"[ACTION] mode={self.action_mode} "
-                    f"norm={np.round(norm_act, 3)} "
+                    f"norm={np.round(norm_act_np, 3)} "
                     f"raw={np.round(action, 4)}"
                 )
-
-            # 4. Command the robot
-            if self.action_mode == "joint":
-                # Joint mode: action is absolute joint positions [q1..q6]
-                joint_update = self._make_joint_motion_update(action)
-                move_robot(joint_motion_update=joint_update)
-            elif self.action_mode == "cartesian_pose":
-                # Absolute pose mode: action is [x,y,z, r1(3), r2(3)]
-                # where r1/r2 are the first two columns of the rotation matrix
-                # (6D rotation representation, Zhou et al. 2019).
-                x, y, z = float(action[0]), float(action[1]), float(action[2])
-                qxyzw = _rot6d_to_quat_xyzw(action[3:6], action[6:9])
-                target_pose = Pose(
-                    position=Point(x=x, y=y, z=z),
-                    orientation=Quaternion(
-                        x=float(qxyzw[0]), y=float(qxyzw[1]),
-                        z=float(qxyzw[2]), w=float(qxyzw[3]),
-                    ),
-                )
-                motion_update = self._make_pose_motion_update(target_pose)
-                move_robot(motion_update=motion_update)
-            else:
-                # Cartesian mode: action is twist delta [dx,dy,dz,dax,day,daz]
-                target_pos = Point(
-                    x=tcp.position.x + float(action[0]),
-                    y=tcp.position.y + float(action[1]),
-                    z=tcp.position.z + float(action[2]),
-                )
-                rotvec = action[3:6].astype(np.float64)
-                angle = np.linalg.norm(rotvec)
-                if angle > 1e-10:
-                    axis = rotvec / angle
-                    half = angle / 2.0
-                    dq = np.array([axis[0]*np.sin(half), axis[1]*np.sin(half),
-                                   axis[2]*np.sin(half), np.cos(half)])
-                else:
-                    dq = np.array([0.0, 0.0, 0.0, 1.0])
-                cq = np.array([tcp.orientation.x, tcp.orientation.y,
-                               tcp.orientation.z, tcp.orientation.w])
-                v1, w1 = cq[:3], cq[3]
-                v2, w2 = dq[:3], dq[3]
-                tw = w1*w2 - np.dot(v1, v2)
-                tv = w1*v2 + w2*v1 + np.cross(v1, v2)
-                tq = np.array([tv[0], tv[1], tv[2], tw])
-                tq /= np.linalg.norm(tq)
-                target_ori = Quaternion(x=float(tq[0]), y=float(tq[1]),
-                                        z=float(tq[2]), w=float(tq[3]))
-                target_pose = Pose(position=target_pos, orientation=target_ori)
-                motion_update = self._make_pose_motion_update(target_pose)
-                move_robot(motion_update=motion_update)
             send_feedback("in progress...")
 
             iter_count += 1
@@ -815,6 +753,70 @@ class RunACT(Policy):
             f"({elapsed_sim_s:.1f}s sim)..."
         )
         return True
+
+    def _act_step(self, observation_msg, move_robot):
+        """One ACT inference step: tensorize obs, forward, un-normalize, dispatch.
+
+        Returns (action, normalized_action_np) so callers can log/inspect.
+        Used by RunACT.insert_cable's inner loop and by RunACTThenInsert,
+        which interleaves ACT inference with a contact-force handoff check.
+        """
+        tcp = observation_msg.controller_state.tcp_pose
+        obs_tensors = self.prepare_observations(observation_msg)
+
+        with torch.inference_mode():
+            normalized_action = self.policy.select_action(obs_tensors)
+
+        if self.action_norm_mode == "MINMAX":
+            raw_action_tensor = (normalized_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min
+        else:
+            raw_action_tensor = (normalized_action * self.action_std) + self.action_mean
+        action = raw_action_tensor[0].cpu().numpy()
+        norm_act_np = normalized_action[0].cpu().numpy()
+
+        if self.action_mode == "joint":
+            joint_update = self._make_joint_motion_update(action)
+            move_robot(joint_motion_update=joint_update)
+        elif self.action_mode == "cartesian_pose":
+            x, y, z = float(action[0]), float(action[1]), float(action[2])
+            qxyzw = _rot6d_to_quat_xyzw(action[3:6], action[6:9])
+            target_pose = Pose(
+                position=Point(x=x, y=y, z=z),
+                orientation=Quaternion(
+                    x=float(qxyzw[0]), y=float(qxyzw[1]),
+                    z=float(qxyzw[2]), w=float(qxyzw[3]),
+                ),
+            )
+            move_robot(motion_update=self._make_pose_motion_update(target_pose))
+        else:
+            target_pos = Point(
+                x=tcp.position.x + float(action[0]),
+                y=tcp.position.y + float(action[1]),
+                z=tcp.position.z + float(action[2]),
+            )
+            rotvec = action[3:6].astype(np.float64)
+            angle = np.linalg.norm(rotvec)
+            if angle > 1e-10:
+                axis = rotvec / angle
+                half = angle / 2.0
+                dq = np.array([axis[0]*np.sin(half), axis[1]*np.sin(half),
+                               axis[2]*np.sin(half), np.cos(half)])
+            else:
+                dq = np.array([0.0, 0.0, 0.0, 1.0])
+            cq = np.array([tcp.orientation.x, tcp.orientation.y,
+                           tcp.orientation.z, tcp.orientation.w])
+            v1, w1 = cq[:3], cq[3]
+            v2, w2 = dq[:3], dq[3]
+            tw = w1*w2 - np.dot(v1, v2)
+            tv = w1*v2 + w2*v1 + np.cross(v1, v2)
+            tq = np.array([tv[0], tv[1], tv[2], tw])
+            tq /= np.linalg.norm(tq)
+            target_ori = Quaternion(x=float(tq[0]), y=float(tq[1]),
+                                    z=float(tq[2]), w=float(tq[3]))
+            target_pose = Pose(position=target_pos, orientation=target_ori)
+            move_robot(motion_update=self._make_pose_motion_update(target_pose))
+
+        return action, norm_act_np
 
     def _make_pose_motion_update(self, pose: Pose, frame_id: str = "base_link"):
         """Build a MODE_POSITION MotionUpdate for the given absolute pose.
