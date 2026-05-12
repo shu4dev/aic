@@ -605,7 +605,7 @@ class RunACT(Policy):
         # Temporal ensembling: default 0.1 (tuned for the AIC SFP task in
         # Exp-29 — TE=0.1 hits 10F/2P/17M/1W vs the paper's 0.01 at 6F/3P).
         # Set ACT_TEMPORAL_ENSEMBLE=off to disable and use RESET_EVERY instead.
-        te_coeff_str = os.environ.get("ACT_TEMPORAL_ENSEMBLE", "0.1")
+        te_coeff_str = os.environ.get("ACT_TEMPORAL_ENSEMBLE", "0.2")
         use_temporal_ensemble = te_coeff_str not in ("", "off", "0")
         if use_temporal_ensemble:
             te_coeff = float(te_coeff_str)
