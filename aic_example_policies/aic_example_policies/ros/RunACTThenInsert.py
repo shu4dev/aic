@@ -91,7 +91,7 @@ class RunACTThenInsert(Policy):
         # finished its trajectory and is just holding pose. A force-only
         # trigger fires too early because ACT itself exerts force during its
         # own descent toward the port.
-        self._settled_window_s = float(os.environ.get("HANDOFF_SETTLED_WINDOW_S", "1.0"))
+        self._settled_window_s = float(os.environ.get("HANDOFF_SETTLED_WINDOW_S", "1.5"))
         self._settled_disp_m = float(os.environ.get("HANDOFF_SETTLED_DISPLACEMENT_M", "0.001"))
         self._min_approach_s = float(os.environ.get("HANDOFF_MIN_APPROACH_S", "3.0"))
         self._handoff_timeout_s = float(os.environ.get("HANDOFF_TIMEOUT_S", "60.0"))
