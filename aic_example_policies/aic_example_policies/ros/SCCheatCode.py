@@ -65,6 +65,18 @@ CONNECTOR_PARAMS = {
         "align_max_iters": 0,
         "align_xy_threshold": 0.0015,
         "align_plug_vel_threshold": 0.0003,
+        # Control stiffness/damping for align+settle+descend. None falls
+        # through to set_pose_target's 90/50 default — the value SFP was
+        # tuned around. Override per-trial with CHEATCODE_STIFFNESS_HIGH=1.
+        "control_stiffness": None,
+        "control_damping": None,
+        "settle_iters": 20,
+        # In-approach PI lock-in: when > 0, the last this-fraction of
+        # _approach() iterations run with the PI integrator active and
+        # high stiffness, so approach exits with the plug already
+        # aligned. 0 keeps SFP's two-phase (cosine-only approach → no
+        # alignment) — its wide cage tolerates an unconverged hand-off.
+        "approach_converge_frac": 0.0,
     },
     "sc": {
         "max_depth": -0.035,
@@ -95,10 +107,34 @@ CONNECTOR_PARAMS = {
         #     consecutive iters) before allowing descent.
         "force_trigger_abs": False,
         "backoff_lift_m": 0.005,
-        "align_after_approach": True,
-        "align_max_iters": 300,   # ~15 s cap at 20 Hz
+        # align_after_approach=False here because alignment now happens
+        # inside _approach via approach_converge_frac (below). The
+        # separate align loop in _align_and_descend stays as fallback
+        # for tasks that prefer two-phase, but is dead code for SC.
+        "align_after_approach": False,
+        "align_max_iters": 300,   # ~15 s cap at 20 Hz (unused for SC now)
         "align_xy_threshold": 0.0015,
         "align_plug_vel_threshold": 0.0003,
+        # SC needs V1's 400/200 profile: the impedance controller at the
+        # 90/50 default cannot generate enough lateral force for the PI
+        # integrator wind-up to drag the cable through the alignment
+        # sleeve — plug_vel stays at ~0.04 mm/iter and align never
+        # converges, leaving the descent to bind on the port lip.
+        "control_stiffness": [400.0, 400.0, 400.0, 150.0, 150.0, 150.0],
+        "control_damping":  [200.0, 200.0, 200.0,  60.0,  60.0,  60.0],
+        # V1 ran 40 iters (~1.6 s) of cable damping before descent; the
+        # 20-iter ACT-chunk-window constraint only matters when
+        # downstream-policy chunk semantics drive the schedule.
+        "settle_iters": 40,
+        # Last 40 % of _approach() iters run PI-active with the 400/200
+        # stiffness above. That folds V1's separate alignment phase into
+        # approach: by the time _approach() returns, the integrator has
+        # wound up and dragged the cable to within align_xy_threshold of
+        # the port, so settle/descent start aligned instead of 5–48 mm
+        # off-center. Stage 1 (first 60 %) is unchanged — cosine blend
+        # with integrator reset every iter — preserving the existing
+        # low-jerk swing-minimized trajectory shape.
+        "approach_converge_frac": 0.4,
     },
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
@@ -111,7 +147,7 @@ DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
 MAX_DESCENT_BACKOFF_ATTEMPTS = 8
 
 
-class ImprovedCheatCode(Policy):
+class SCCheatCode(Policy):
     def __init__(self, parent_node):
         self._task = None
         self._ix = 0.0
@@ -611,8 +647,11 @@ class ImprovedCheatCode(Policy):
         the magnitudes of all in-window samples — same channel as
         peak_magnitude/median_magnitude so threshold semantics line up.
         """
-        # Wait long enough for the buffer to fill at least 200ms of samples.
-        self.sleep_for(0.2)
+        # Wait long enough for the buffer to fill at least 100 ms of fresh
+        # samples (ported from V5). At ~100 Hz wrench rate that's still ≥10
+        # medians — plenty for robust statistics — and shaves 100 ms of
+        # "stay still" labels off every trial.
+        self.sleep_for(0.1)
         now = self._now_s()
         # Use a 200ms causal window — wider than the per-iter control window
         # (50ms) so we average across a couple of camera cycles.
@@ -726,6 +765,17 @@ class ImprovedCheatCode(Policy):
 
     def _approach(self, move_robot, send_feedback):
         send_feedback("Approaching port...")
+        # Per-task knobs. approach_converge_frac > 0 turns on Stage 2 (PI
+        # lock-in at the end of approach) so _approach() exits with the
+        # cable already aligned. SFP keeps it at 0.0 → byte-identical to
+        # the prior single-stage cosine-only approach.
+        params = CONNECTOR_PARAMS.get(self._task.plug_type, DEFAULT_PARAMS)
+        conv_frac = params.get("approach_converge_frac", 0.0)
+        ctrl_stiff = params.get("control_stiffness")
+        ctrl_damp = params.get("control_damping")
+        xy_thresh = params.get("align_xy_threshold", 0.0015)
+        vel_thresh = params.get("align_plug_vel_threshold", 0.0003)
+
         # Diagnostic-only: log gripper-to-port distance at trial start.
         # We previously had a bad_start threshold here, but the heuristic
         # was unreliable (false positives from cable swing). Dataset
@@ -743,41 +793,152 @@ class ImprovedCheatCode(Policy):
                 f"approach_start:gripper_to_port={d_mm:.0f}mm"
             )
 
-        # Distance-proportional iteration count to bound peak swing velocity.
-        # Cosine blend `frac = 0.5*(1 - cos(π·t/N))` has peak velocity
-        # π·d/(2·T) at the trajectory midpoint. Capping peak velocity at
-        # PEAK_VEL_MS = 30 mm/s reduces cable-swing excitation, so the
-        # subsequent SETTLE phase has less work to dampen and PI converges
-        # to within 1 mm by descent start. 100-iter floor keeps short
-        # approaches at the historical pace.
-        PEAK_VEL_MS = 0.030  # 30 mm/s peak — conservative, swing-minimizing
-        required_iters = int(math.pi * d_m / (2 * PEAK_VEL_MS) * self._control_hz)
-        APPROACH_ITERS = max(100, required_iters)
+        # Trapezoidal velocity profile (ported from V5 ImprovedCheatCode):
+        # linear ramp-up (RAMP_S) → cruise at PEAK_VEL_MS → linear ramp-down.
+        # Replaces the prior cosine profile which spent ~30 % of frames in
+        # low-velocity tails — those low-Δ frames biased ACT BC training
+        # toward "stay still" predictions at eval. Trapezoid keeps the
+        # middle ~80 % of frames at cruise velocity, giving cleaner large-Δ
+        # action labels. PEAK 40 mm/s + 0.5 s ramps also shaves total
+        # approach time roughly in half vs the prior 30 mm/s cosine.
+        PEAK_VEL_MS = 0.040  # 40 mm/s peak
+        RAMP_S      = 0.5     # 0.5 s linear accel/decel each end
+        ramp_iters  = max(1, int(RAMP_S * self._control_hz))
+        ramp_dist   = 0.5 * PEAK_VEL_MS * RAMP_S
+        if d_m >= 2 * ramp_dist:
+            cruise_dist  = d_m - 2 * ramp_dist
+            cruise_iters = max(1, int(cruise_dist / PEAK_VEL_MS * self._control_hz))
+        else:
+            # Short approach — can't reach peak. Symmetric triangle profile,
+            # truncate peak velocity to fit.
+            cruise_dist  = 0.0
+            cruise_iters = 0
+            ramp_iters   = max(1, int((d_m / PEAK_VEL_MS) * self._control_hz))
+            ramp_dist    = d_m / 2
+        transit_iters = 2 * ramp_iters + cruise_iters
+        accel = PEAK_VEL_MS / max(1e-6, RAMP_S)  # m/s² during ramp
+        # Stage 1 (trapezoid transit) runs for transit_iters; Stage 2 (PI
+        # lock-in) adds a per-task PI budget on top. SFP has conv_frac=0,
+        # so pi_cap=0 and APPROACH_ITERS == transit_iters → byte-equivalent
+        # to V5's pure-trapezoid approach. SC has conv_frac=0.4 → pi_cap is
+        # 2/3 of transit_iters, giving ~5–6 s of PI alignment after transit.
+        if conv_frac > 0.0:
+            pi_cap = int(conv_frac / (1.0 - conv_frac) * transit_iters)
+        else:
+            pi_cap = 0
+        APPROACH_ITERS = transit_iters + pi_cap
+        stage2_t       = transit_iters
         self.get_logger().info(
             f"approach: d={d_m*1000:.0f}mm  iters={APPROACH_ITERS}  "
-            f"({APPROACH_ITERS / self._control_hz:.1f}s @ {self._control_hz:.0f}Hz)"
+            f"stage2_at={stage2_t}  "
+            f"({APPROACH_ITERS / self._control_hz:.1f}s @ {self._control_hz:.0f}Hz)  "
+            f"trapezoid peak={PEAK_VEL_MS*1000:.0f}mm/s ramp={RAMP_S:.1f}s"
         )
 
+        stable_count = 0
+        prev_plug_xy = None
+        stage2_logged = False
+        final_xy_err = None
+        conv_iters = 0
         for t in range(APPROACH_ITERS):
-            frac = 0.5 * (1.0 - math.cos(math.pi * t / APPROACH_ITERS))
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
-            if not all([port, plug, grip]):
+            if port is None or plug is None or grip is None:
                 self.sleep_for(0.03)
                 continue
-            # 0.08 m hover (raised from 0.05): gives the gripper margin so its
-            # body clears the NIC card top during the cosine-blended swing.
-            # XY/rot biases shift the target so the cable lands at a handoff
-            # state that matches the approach-policy distribution at eval.
-            pose = self._calc_pose(port, plug, grip, 0.08,
-                                   slerp_frac=frac, pos_frac=frac, reset_integrator=True,
-                                   xy_offset=self._approach_xy_bias,
-                                   rot_bias_quat=self._approach_rot_bias)
-            self._send_pose(move_robot, pose)
+
+            if t < stage2_t:
+                # ── Stage 1: trapezoid blend, integrator off, default stiffness ──
+                # 0.08 m hover (raised from 0.05): gives the gripper margin so
+                # its body clears the NIC card top during transit. XY/rot
+                # biases shift the target so the cable lands at a handoff
+                # state matching the approach-policy distribution at eval.
+                tp = t / self._control_hz
+                if t < ramp_iters:                                  # accel
+                    pos = 0.5 * accel * tp * tp
+                elif t < ramp_iters + cruise_iters:                  # cruise
+                    tp_c = (t - ramp_iters) / self._control_hz
+                    pos = ramp_dist + PEAK_VEL_MS * tp_c
+                else:                                                # decel
+                    tp_d = (t - ramp_iters - cruise_iters) / self._control_hz
+                    pos = (ramp_dist + cruise_dist
+                           + PEAK_VEL_MS * tp_d - 0.5 * accel * tp_d * tp_d)
+                frac = max(0.0, min(1.0, pos / max(1e-6, d_m)))
+                pose = self._calc_pose(port, plug, grip, 0.08,
+                                       slerp_frac=frac, pos_frac=frac, reset_integrator=True,
+                                       xy_offset=self._approach_xy_bias,
+                                       rot_bias_quat=self._approach_rot_bias)
+                self._send_pose(move_robot, pose)
+            else:
+                # ── Stage 2: PI lock-in, integrator accumulates, high stiffness ──
+                # Integrator starts at 0 (Stage 1 reset every iter). At
+                # _i_gain=0.15 and _max_windup=0.05 m it saturates within
+                # ~10 iters at typical 5–15 mm offset, commanding the gripper
+                # laterally enough to drag the cable through swing. With the
+                # 400/200 stiffness profile from CONNECTOR_PARAMS the gripper
+                # actually moves; with the prior 90/50 default it would not.
+                if not stage2_logged:
+                    bx, by = self._approach_xy_bias
+                    ex0 = port.translation.x + bx - plug.translation.x
+                    ey0 = port.translation.y + by - plug.translation.y
+                    xy0 = math.sqrt(ex0 * ex0 + ey0 * ey0)
+                    self.get_logger().info(
+                        f"[approach_stage2] entry xy_err={xy0*1000:.2f}mm at iter {t}"
+                    )
+                    stage2_logged = True
+                pose = self._calc_pose(port, plug, grip, 0.08,
+                                       slerp_frac=1.0, pos_frac=1.0, reset_integrator=False,
+                                       xy_offset=self._approach_xy_bias,
+                                       rot_bias_quat=self._approach_rot_bias)
+                self._send_pose(move_robot, pose,
+                                stiffness=ctrl_stiff, damping=ctrl_damp)
+                # V1-style stability gate: xy_err and plug_vel both below
+                # threshold for 3 consecutive iters → break early.
+                bx, by = self._approach_xy_bias
+                ex = port.translation.x + bx - plug.translation.x
+                ey = port.translation.y + by - plug.translation.y
+                xy_err = math.sqrt(ex * ex + ey * ey)
+                if prev_plug_xy is not None:
+                    dxp = plug.translation.x - prev_plug_xy[0]
+                    dyp = plug.translation.y - prev_plug_xy[1]
+                    plug_vel = math.sqrt(dxp * dxp + dyp * dyp)
+                else:
+                    plug_vel = 1.0
+                prev_plug_xy = (plug.translation.x, plug.translation.y)
+                conv_iters += 1
+                final_xy_err = xy_err
+                if xy_err < xy_thresh and plug_vel < vel_thresh:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        self.get_logger().info(
+                            f"[approach_converged] xy_err={xy_err*1000:.2f}mm "
+                            f"after {conv_iters} PI iters"
+                        )
+                        self.sleep_for(self._control_dt)
+                        break
+                else:
+                    stable_count = 0
             self.sleep_for(self._control_dt)
+
+        if conv_frac > 0.0 and final_xy_err is not None:
+            if final_xy_err >= xy_thresh and stable_count < 3:
+                self.get_logger().warn(
+                    f"[approach_done] capped at {conv_iters} PI iters, "
+                    f"final xy_err={final_xy_err*1000:.2f}mm "
+                    f"(threshold {xy_thresh*1000:.2f}mm) — descending anyway"
+                )
+            else:
+                self.get_logger().info(
+                    f"[approach_done] xy_err={final_xy_err*1000:.2f}mm "
+                    f"conv_iters={conv_iters}"
+                )
+
         self.get_logger().info("Approach done, settling...")
-        self.sleep_for(0.8)
+        # Removed the prior sleep_for(0.8) — the trapezoid's 0.5 s decel tail
+        # already brings the gripper to ~0 velocity before settle starts; the
+        # explicit pause was contributing only "stay still" frames to the
+        # training labels.
 
     def _align_and_descend(self, move_robot, get_obs, send_feedback):
         """Settle (sustained PI hold) → descent (straight down + directed correction on backoff).
@@ -791,6 +952,12 @@ class ImprovedCheatCode(Policy):
         correction (not random) on backoff.
         """
         params = CONNECTOR_PARAMS.get(self._task.plug_type, DEFAULT_PARAMS)
+        # Per-task control profile. SC requires V1's high-stiffness 400/200
+        # for PI integrator authority through the alignment sleeve; SFP
+        # keeps None so _send_pose falls through to the 90/50 default.
+        ctrl_stiff = params.get("control_stiffness")
+        ctrl_damp = params.get("control_damping")
+        settle_iters = params.get("settle_iters", 20)
         self._ix = 0.0
         self._iy = 0.0
 
@@ -830,7 +997,13 @@ class ImprovedCheatCode(Policy):
         # The PI integrator is NOT reset here — it should keep accumulating
         # so it converges to the biased target during this loop (same
         # behavior as the V2 settle that follows).
-        if params.get("align_after_approach", False):
+        # Fallback align loop: only runs when in-approach convergence is
+        # disabled (approach_converge_frac == 0.0). With SC now folding the
+        # alignment work into _approach() via Stage 2 PI lock-in, this block
+        # is dead code for SC and acts only as a guard for any task that
+        # opts into align_after_approach without approach_converge_frac.
+        if (params.get("align_after_approach", False)
+                and params.get("approach_converge_frac", 0.0) == 0.0):
             self._publish_phase("aligning")
             send_feedback("Aligning...")
             align_max_iters = params.get("align_max_iters", 300)
@@ -868,7 +1041,8 @@ class ImprovedCheatCode(Policy):
                 pose = self._calc_pose(port, plug, grip, z_offset,
                                        xy_offset=self._approach_xy_bias,
                                        rot_bias_quat=self._approach_rot_bias)
-                self._send_pose(move_robot, pose)
+                self._send_pose(move_robot, pose,
+                                stiffness=ctrl_stiff, damping=ctrl_damp)
                 self.sleep_for(self._control_dt)
 
                 if align_iter % 30 == 0:
@@ -921,8 +1095,10 @@ class ImprovedCheatCode(Policy):
         # the model sees a realistic noisy "hold" pattern.
         self._publish_phase("settling")
         send_feedback("Settling...")
-        SETTLE_ITERS = 20  # 1.0s @ 20Hz
-        for settle_iter in range(SETTLE_ITERS):
+        # Per-task settle duration: 20 iters (~1.0s) for SFP to keep within
+        # ACT chunk-window; 40 iters (~1.6s) for SC to match V1's cable-
+        # damp time before descent.
+        for settle_iter in range(settle_iters):
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
@@ -930,7 +1106,8 @@ class ImprovedCheatCode(Policy):
                 pose = self._calc_pose(port, plug, grip, z_offset,
                                        xy_offset=self._approach_xy_bias,
                                        rot_bias_quat=self._approach_rot_bias)
-                self._send_pose(move_robot, pose)
+                self._send_pose(move_robot, pose,
+                                stiffness=ctrl_stiff, damping=ctrl_damp)
             self.sleep_for(self._control_dt)
             if settle_iter == 0 or settle_iter == 17 or settle_iter == 34:
                 if plug is not None and port is not None:
@@ -1037,6 +1214,22 @@ class ImprovedCheatCode(Policy):
         consecutive_centered_backoffs = 0
         hover_recovery_count = 0  # how many times hover recovery has fired this trial
 
+        # XY-probe before backoff (ported from V5 ImprovedCheatCode):
+        # When force exceeds F_soft, first try a small circular XY scan at
+        # the current target before falling through to the lift+retarget
+        # backoff. "Wiggle to find slot" produces clean deterministic action
+        # labels for ACT BC and avoids destroying partial-engagement progress
+        # in SC's tight alignment sleeve. Holds z and oscillates xy_offset by
+        # PROBE_RADIUS_M for up to PROBE_MAX_ITERS, exiting early on force
+        # release (df_med ≤ F_ref). On exhaustion, falls through to backoff.
+        PROBE_RADIUS_M     = 0.0015          # 1.5 mm
+        PROBE_PERIOD_S     = 0.5              # 2 Hz scan rate
+        PROBE_MAX_S        = 1.5              # max probe duration before backoff fallback
+        PROBE_PERIOD_ITERS = max(2, int(PROBE_PERIOD_S * self._control_hz))
+        PROBE_MAX_ITERS    = int(PROBE_MAX_S * self._control_hz)
+        probe_iter         = 0               # 0 = idle; 1..PROBE_MAX_ITERS while active
+        probe_center_xy    = None            # snapshot of descent_xy_offset at probe start
+
         while True:
             port = self._port_tf()
             plug = self._plug_tf()
@@ -1104,10 +1297,67 @@ class ImprovedCheatCode(Policy):
             backed_off = False
             # 2 mm gate: if cable is right at the port, force feedback is
             # almost certainly port-rim rubbing during good insertion —
-            # don't retreat, just let the taper logic creep forward.
+            # don't retreat with the lift+retarget backoff. But we still
+            # want the *XY probe* to fire there: when cable is centered
+            # but force is high (e.g., bottom snagged on lip edge,
+            # rotational misalignment), a small XY scan with z held may
+            # engage the slot without disturbing the descent target.
             BACKOFF_DISTANCE_GATE_M = 0.002
-            if (cooldown_remaining == 0 and df_med >= F_soft
-                    and cable_to_port > BACKOFF_DISTANCE_GATE_M):
+            force_high = (
+                cooldown_remaining == 0
+                and df_med >= F_soft
+            )
+            high_force_offcenter = (
+                force_high
+                and cable_to_port > BACKOFF_DISTANCE_GATE_M
+            )
+
+            # ── XY-probe gating ──────────────────────────────────────────
+            # If we're already probing OR just hit the backoff-trigger
+            # condition, run the probe state machine. Probe overrides
+            # descent_xy_offset with a circular pattern and holds z. It
+            # ends on either force release (df_med ≤ F_ref) or exhaustion
+            # (probe_iter ≥ PROBE_MAX_ITERS). On exhaustion control falls
+            # through to either backoff (off-center) or tapered descent
+            # (centered).
+            probe_active = False
+            if force_high and probe_iter == 0:
+                probe_center_xy = descent_xy_offset.copy()
+                probe_iter = 1
+                self._publish_event(
+                    f"xy_probe_start:r={PROBE_RADIUS_M*1000:.1f}mm"
+                    f":T={PROBE_PERIOD_S}s:max={PROBE_MAX_S}s"
+                    f":df_med={df_med:.2f}N:to_port={cable_to_port*1000:.2f}mm"
+                )
+            if probe_iter > 0:
+                if df_med <= F_ref:
+                    descent_xy_offset = probe_center_xy.copy()
+                    self._publish_event(
+                        f"xy_probe_end:reason=release"
+                        f":iters={probe_iter}:df_med={df_med:.2f}N"
+                    )
+                    probe_iter = 0
+                    probe_center_xy = None
+                elif probe_iter >= PROBE_MAX_ITERS:
+                    descent_xy_offset = probe_center_xy.copy()
+                    self._publish_event(
+                        f"xy_probe_end:reason=exhausted"
+                        f":iters={probe_iter}:df_med={df_med:.2f}N"
+                    )
+                    probe_iter = 0
+                    probe_center_xy = None
+                else:
+                    phase = (probe_iter - 1) * (2.0 * math.pi / PROBE_PERIOD_ITERS)
+                    descent_xy_offset = probe_center_xy + np.array([
+                        PROBE_RADIUS_M * math.cos(phase),
+                        PROBE_RADIUS_M * math.sin(phase),
+                    ])
+                    probe_iter += 1
+                    probe_active = True
+
+            if probe_active:
+                step = 0.0                          # hold z while probing
+            elif high_force_offcenter:
                 step = -base_step * 0.5
                 backed_off = True
             elif df_med <= F_ref:
@@ -1263,9 +1513,11 @@ class ImprovedCheatCode(Policy):
 
             pose = self._calc_pose(port, plug, grip, z_offset,
                                    xy_offset=tuple(descent_xy_offset))
-            # Stiffness/damping reverted to set_pose_target defaults
-            # (90/50). See comment in the align loop above for rationale.
-            self._send_pose(move_robot, pose)
+            # Per-task control profile (params["control_stiffness"]).
+            # SFP uses None → set_pose_target's 90/50 default. SC uses
+            # 400/200 to give PI authority through the alignment sleeve.
+            self._send_pose(move_robot, pose,
+                            stiffness=ctrl_stiff, damping=ctrl_damp)
 
             # Single sleep — wrench buffer keeps filling in the background
             # at the topic's native rate (no extra polls, no extra sleeps).
