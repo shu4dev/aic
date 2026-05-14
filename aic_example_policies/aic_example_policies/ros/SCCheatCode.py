@@ -182,8 +182,8 @@ class SCCheatCode(Policy):
         # naturally corrects on the next iteration.
         #   CHEATCODE_NOISE_POS — 1-sigma noise in each position axis (meters)
         #   CHEATCODE_NOISE_ROT — 1-sigma small-angle noise magnitude (radians)
-        self._noise_pos = float(os.environ.get("CHEATCODE_NOISE_POS", "0") or 0.0)
-        self._noise_rot = float(os.environ.get("CHEATCODE_NOISE_ROT", "0") or 0.0)
+        self._noise_pos = float(os.environ.get("CHEATCODE_NOISE_POS", "0.001") or 0.0)
+        self._noise_rot = float(os.environ.get("CHEATCODE_NOISE_ROT", "0.01") or 0.0)
         # Each worker uses its own RNG so parallel collections don't correlate.
         self._rng = np.random.default_rng()
         # Descent target xy noise — when > 0, the descent target is biased by
@@ -195,7 +195,7 @@ class SCCheatCode(Policy):
         # half-width, e.g. 1.5 mm for SFP) for a useful mix of clean inserts
         # and binding events.
         self._descent_offset_sigma = float(
-            os.environ.get("CHEATCODE_DESCENT_OFFSET_XY", "0") or 0.0
+            os.environ.get("CHEATCODE_DESCENT_OFFSET_XY", "0.0015") or 0.0
         )
         # Approach-handoff biases — when sigma > 0, every episode samples a
         # sticky XY/rotation offset that shifts the approach + aligning +
@@ -208,10 +208,10 @@ class SCCheatCode(Policy):
         #   CHEATCODE_APPROACH_XY_BIAS  — 1-σ XY position bias (meters)
         #   CHEATCODE_APPROACH_ROT_BIAS — 1-σ rotation bias (radians)
         self._approach_xy_sigma = float(
-            os.environ.get("CHEATCODE_APPROACH_XY_BIAS", "0") or 0.0
+            os.environ.get("CHEATCODE_APPROACH_XY_BIAS", "0.005") or 0.0
         )
         self._approach_rot_sigma = float(
-            os.environ.get("CHEATCODE_APPROACH_ROT_BIAS", "0") or 0.0
+            os.environ.get("CHEATCODE_APPROACH_ROT_BIAS", "0.02") or 0.0
         )
         # Per-trial bias values — set by _sample_approach_biases() at the
         # start of each insert_cable() call. Identity defaults so any code
