@@ -13,13 +13,16 @@
 #
 # Designed for the Lambda 1× A100 40 GB / 30 vCPU / 200 GB RAM instance.
 # Networking:
-#   * Worker 0 (the default) uses --network host so the host-side policy +
-#     relay reach the container's Zenoh router on 127.0.0.1:7447 — same as
-#     the original single-worker flow.
-#   * Workers ≥1 (PART_INDEX ≥ 1, or ROUTER_PORT set explicitly to something
-#     other than 7447) use bridge networking with --publish 127.0.0.1:<port>:7447
-#     so multiple containers can coexist on one Lambda box. The host-side
-#     sessions are pointed at the per-worker port via ZENOH_CONFIG_OVERRIDE.
+#   * Every worker container is created by scripts/setup_workers.sh as a
+#     long-lived distrobox container on --network host (distrobox default).
+#   * scripts/setup_workers.sh bind-mounts a per-worker /entrypoint.sh that
+#     pins the in-container Zenoh router to a distinct host port: worker i
+#     listens on 7447+i. That's what lets N>1 coexist under --network host.
+#   * Worker 0 (the default) uses port 7447 — identical wire behavior to the
+#     original single-worker manual flow.
+#   * Workers ≥1 (PART_INDEX ≥ 1, or ROUTER_PORT set explicitly) connect their
+#     host-side policy + relay to localhost:$ROUTER_PORT via the per-worker
+#     ZENOH_CONFIG_OVERRIDE this script sets just below.
 #     Use scripts/run_parallel_multi.sh to orchestrate N concurrent workers.
 #
 # Usage:
@@ -65,10 +68,10 @@
 #   AIC_IMAGE_SCALE  passed to container env (default: unset)
 #   NAME             container name       (default: aic_worker; suffixed with _<i> when PART_INDEX is set)
 #   ROUTER_PORT      Zenoh router host port (default: 7447, or 7447+PART_INDEX
-#                                          when PART_INDEX is set). 7447 keeps
-#                                          --network host; anything else uses
-#                                          bridge + --publish 127.0.0.1:<port>:7447
-#                                          so multiple workers can share one host.
+#                                          when PART_INDEX is set). Must match
+#                                          the port baked into the worker's
+#                                          per-container /entrypoint.sh by
+#                                          scripts/setup_workers.sh.
 #   WORKER_CPUS      --cpus per container (default: 30; for N-way parallel,
 #                                          set to ⌊30/N⌋ so the box isn't oversubscribed)
 #   WORKER_MEM       --memory per container (default: 192g; for N-way parallel,
@@ -138,10 +141,11 @@ fi
 
 # Auto-derive ROUTER_PORT from PART_INDEX so concurrent workers on the same host
 # get distinct Zenoh listen ports: worker 0 → 7447, worker 1 → 7448, …
-# Worker 0 stays on --network host (current behavior); workers ≥1 switch to
-# bridge networking with --publish 127.0.0.1:<port>:7447 because the image's
-# entrypoint (docker/aic_eval/zenoh_config_router.sh) hardcodes the in-container
-# listen endpoint to 7447 and can't be overridden via -e at run time.
+# Must match the port baked into the worker's bind-mounted /entrypoint.sh by
+# scripts/setup_workers.sh — that's what makes N>1 actually run on one host
+# under distrobox's --network host default. The image's stock /entrypoint.sh
+# hardcodes 7447 and can't be overridden via env, so the per-worker entrypoint
+# bind-mount is how we vary the port.
 if [ -z "$ROUTER_PORT" ]; then
     if [ -n "$PART_INDEX" ]; then
         ROUTER_PORT=$((7447 + PART_INDEX))
