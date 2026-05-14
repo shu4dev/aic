@@ -63,21 +63,6 @@ sudo apt install -y libnvidia-gl-580-server=580.105.08-0lambda0.24.04.1
 Follow the standard setup from [getting_started.md](./getting_started.md), abbreviated here:
 
 ```bash
-# Docker
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-newgrp docker
-
-# NVIDIA Container Toolkit
-distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -fsSL https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update && sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-
 # Distrobox
 sudo apt install -y distrobox
 
@@ -112,13 +97,14 @@ pixi install
 The critical flag here is `NVIDIA_DRIVER_CAPABILITIES=all` — without it, the container gets compute but not graphics.
 
 ```bash
+echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u shu4dev --password-stdin
+
+docker pull ghcr.io/shu4dev/aic-eval:v1
+
 export DBX_CONTAINER_MANAGER=docker
 
-docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-
-distrobox create -r --nvidia \
-  --additional-flags "--env NVIDIA_DRIVER_CAPABILITIES=all --env NVIDIA_VISIBLE_DEVICES=all" \
-  -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
+distrobox create -r --nvidia -i ghcr.io/shu4dev/aic-eval:v1 aic_eval_v1
+distrobox enter -r aic_eval_v1
 ```
 
 ---
@@ -205,11 +191,6 @@ Key launch arguments for headless:
 | `start_aic_engine` | `true` | Run the scoring engine |
 | `ground_truth` | `false` | Match the evaluation configuration |
 
-In a second terminal, confirm gzserver is actually using the GPU:
-
-```bash
-watch -n1 nvidia-smi
-```
 
 You should see a `component_container` / `ruby` / `gz sim server` process under **Processes** with non-zero GPU memory usage.
 
@@ -295,13 +276,16 @@ The same native ROS 2 environment makes these one-liners work without pixi or `d
 
 ```bash
 # Downscale + JPEG-encode camera images to shrink MCAP bags ~160x
+
+sudo apt install ros-kilted-rmw-zenoh-cpp
+
+source /opt/ros/kilted/setup.bash
+
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+
+export ZENOH_CONFIG_OVERRIDE="transport/shared_memory/enabled=false"
+
 python3 scripts/image_relay_node.py
-
-# Inspect a live topic
-ros2 topic echo /scoring/insertion_event
-
-# Record any topic to MCAP
-ros2 bag record -s mcap /joint_states /fts_broadcaster/wrench
 ```
 
 These all reach the eval container's Zenoh router transparently because `RMW_IMPLEMENTATION=rmw_zenoh_cpp` + `transport/shared_memory/enabled=false` is set in the shell.

@@ -2,59 +2,95 @@
 # Run N aic_eval containers in parallel, each evaluating a chunk of trials
 # produced by scripts/split_trials.py.
 #
-# Designed for a Lambda Cloud GPU instance (A10 24 GB or A100 40 GB) that
-# has been prepared per docs/lambda_headless_setup.md — i.e., the host has
-# matching libnvidia-gl-*-server packages installed and NVIDIA Container
-# Toolkit is configured.
+# Designed for a Lambda Cloud GPU instance prepared per
+# docs/lambda_headless_setup.md — i.e., the host has matching
+# libnvidia-gl-*-server packages installed and NVIDIA Container Toolkit
+# is configured.
+#
+# Default sizing targets a 1× A100 40 GB / 30 vCPU / 200 GB RAM Lambda
+# instance: 6 workers × (5 CPUs, 32 GB RAM) = 30 CPU / 192 GB,
+# leaving ~8 GB host headroom. A100 40 GB VRAM is non-binding (~1-2 GB
+# per headless gz-sim worker). Override N on the CLI and per-worker
+# limits via WORKER_CPUS / WORKER_MEM (see below).
 #
 # Each worker:
 #   * runs as its own Docker container with its own network namespace
 #     (default bridge), so port 7447 inside one container does not collide
 #     with port 7447 inside another;
-#   * mounts a unique split config at /tmp/aic_config.yaml and a unique
-#     host results dir at /root/aic_results;
-#   * launches the policy via `docker exec` after the eval's Zenoh router
-#     comes up, so eval + policy share the container's loopback.
+#   * mounts a unique split config at /tmp/aic_config.yaml, a unique
+#     host results dir at /root/aic_results, and the host-side
+#     image_relay_node.py at /tmp/image_relay_node.py;
+#   * launches image_relay_node (downscale + JPEG re-encode of camera
+#     topics → ~160× smaller MCAP bags; see Step 8 of
+#     docs/lambda_headless_setup.md) and the policy via `docker exec`
+#     after the eval's Zenoh router comes up, so eval + relay + policy
+#     all share the container's loopback.
 #
 # Workers self-terminate after their last trial because we pass
 # `shutdown_on_aic_engine_exit:=true` to /entrypoint.sh.
 #
 # Usage:
-#   # 1. Split the trial config:
+#   # 1. Split the trial config (match --num-parts to N below):
 #   pixi run python scripts/split_trials.py \
 #       --input aic_engine/config/train.yaml \
 #       --output-dir ~/aic_split_configs \
-#       --num-parts 4
+#       --num-parts 6
 #
-#   # 2. Run the workers:
-#   bash scripts/run_parallel.sh 4
+#   # 2. Run the workers (defaults to 6 on the A100 40 GB instance):
+#   bash scripts/run_parallel.sh 6
 #
 #   # 3. Merge the per-worker score files:
 #   pixi run python scripts/merge_scores.py --results-root ~
 #
 # Environment overrides (all optional):
-#   IMAGE          eval Docker image       (default: ghcr.io/intrinsic-dev/aic/aic_eval:latest)
+#   IMAGE          eval Docker image       (default: ghcr.io/shu4dev/aic-eval:v1)
 #   CONFIGS_DIR    where the splits live   (default: $HOME/aic_split_configs)
 #   POLICY         policy module path      (default: aic_example_policies.ros.SCCheatCode)
 #   RESULTS_BASE   per-worker results root (default: $HOME/aic_results_<i>)
 #   RECORDING_DIR  optional MCAP root      (if set, mounts to /root/aic_recordings)
 #   AIC_IMAGE_SCALE  passed into the policy environment (default: unset)
 #   GROUND_TRUTH   ground_truth launch arg (default: true — required for recording)
+#   WORKER_CPUS    --cpus per container    (default: 5      → 6×5 = 30 vCPU)
+#   WORKER_MEM     --memory per container  (default: 32g    → 6×32 = 192 GB)
+#   IMAGE_RELAY    launch image_relay_node inside each worker
+#                                          (default: 1; set to 0 to skip)
+#   RELAY_NODE     host path to image_relay_node.py
+#                                          (default: alongside this script)
 #
 # Notes:
+#   * The default IMAGE is a private GHCR repo. Log in once before running:
+#       echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u shu4dev --password-stdin
+#     (matches Step 4 of docs/lambda_headless_setup.md). Otherwise the first
+#     `docker run` fails with "pull access denied" / "manifest unknown".
 #   * `--gpus all` + NVIDIA_DRIVER_CAPABILITIES=all is required for Ogre2 to
 #     find the NVIDIA EGL ICD. See docs/lambda_headless_setup.md if you hit
 #     "OpenGL 3.3 is not supported" or "Found Num EGL Devices: 0".
+#   * image_relay runs inside each container (not on the host as in Step 8 of
+#     the doc) because each worker has its own Zenoh router on its own
+#     container-local loopback — host-side relay can only see one worker.
+#     Container-side launch shares the eval router's UTS/IPC namespace, so
+#     Zenoh shared-memory works and ZENOH_CONFIG_OVERRIDE is not needed.
 #   * Use `sudo docker logs -f aic_worker_<i>` to tail any worker live.
 
 set -euo pipefail
 
-N="${1:-4}"
-IMAGE="${IMAGE:-ghcr.io/intrinsic-dev/aic/aic_eval:latest}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+N="${1:-6}"
+IMAGE="${IMAGE:-ghcr.io/shu4dev/aic-eval:v1}"
 CONFIGS_DIR="${CONFIGS_DIR:-$HOME/aic_split_configs}"
 POLICY="${POLICY:-aic_example_policies.ros.SCCheatCode}"
 GROUND_TRUTH="${GROUND_TRUTH:-true}"
 PREFIX="${PREFIX:-train_part}"
+WORKER_CPUS="${WORKER_CPUS:-5}"
+WORKER_MEM="${WORKER_MEM:-32g}"
+IMAGE_RELAY="${IMAGE_RELAY:-1}"
+RELAY_NODE="${RELAY_NODE:-$SCRIPT_DIR/image_relay_node.py}"
+
+if [ "$IMAGE_RELAY" = "1" ] && [ ! -f "$RELAY_NODE" ]; then
+    echo "error: image_relay_node not found at $RELAY_NODE — set RELAY_NODE or IMAGE_RELAY=0" >&2
+    exit 1
+fi
 
 DOCKER="sudo docker"
 if ${DOCKER} info >/dev/null 2>&1; then :; else
@@ -67,12 +103,29 @@ if [ ! -d "$CONFIGS_DIR" ]; then
     exit 1
 fi
 
+# Verify the image is locally present or pullable. Catches "not logged in
+# to ghcr.io" up front with a clear message instead of letting the first
+# `docker run` in Stage 1 fail halfway through with "pull access denied".
+if ! ${DOCKER} image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "Pulling $IMAGE ..."
+    if ! ${DOCKER} pull "$IMAGE"; then
+        echo "" >&2
+        echo "error: cannot pull $IMAGE." >&2
+        echo "       If this is a private GHCR repo, log in first:" >&2
+        echo "       echo \"\$GHCR_TOKEN\" | ${DOCKER} login ghcr.io -u shu4dev --password-stdin" >&2
+        echo "       (see Step 4 of docs/lambda_headless_setup.md)" >&2
+        exit 1
+    fi
+fi
+
 echo "=== Parallel AIC eval ==="
 echo "Workers:     $N"
 echo "Image:       $IMAGE"
 echo "Splits dir:  $CONFIGS_DIR"
 echo "Policy:      $POLICY"
 echo "ground_truth: $GROUND_TRUTH"
+echo "Per-worker:  --cpus=$WORKER_CPUS --memory=$WORKER_MEM"
+echo "Image relay: $([ "$IMAGE_RELAY" = "1" ] && echo "on ($RELAY_NODE)" || echo "off")"
 echo ""
 
 # --- Stage 1: start N detached eval containers ---
@@ -102,9 +155,16 @@ for i in $(seq 0 $((N-1))); do
         image_scale_args=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
     fi
 
+    relay_mount_args=()
+    if [ "$IMAGE_RELAY" = "1" ]; then
+        relay_mount_args=(-v "$RELAY_NODE:/tmp/image_relay_node.py:ro")
+    fi
+
     ${DOCKER} run -d --rm \
         --name "$NAME" \
         --gpus all \
+        --cpus "$WORKER_CPUS" \
+        --memory "$WORKER_MEM" \
         --env NVIDIA_DRIVER_CAPABILITIES=all \
         --env NVIDIA_VISIBLE_DEVICES=all \
         --env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
@@ -114,6 +174,7 @@ for i in $(seq 0 $((N-1))); do
         -e AIC_RESULTS_DIR=/root/aic_results \
         "${recording_args[@]}" \
         "${image_scale_args[@]}" \
+        "${relay_mount_args[@]}" \
         "$IMAGE" \
         aic_engine_config_file:=/tmp/aic_config.yaml \
         ground_truth:="$GROUND_TRUTH" \
@@ -142,7 +203,25 @@ for NAME in "${worker_names[@]}"; do
     done
 done
 
-# --- Stage 3: launch the policy inside each container ---
+# --- Stage 3a: launch image_relay_node inside each container ---
+# Must come up before the policy so /<cam>/image_small is being
+# published by the time the eval engine starts recording (per Step 8 of
+# docs/lambda_headless_setup.md). Container-local: each worker has its
+# own Zenoh router on its own loopback, so one relay per container.
+if [ "$IMAGE_RELAY" = "1" ]; then
+    for NAME in "${worker_names[@]}"; do
+        ${DOCKER} exec -d "$NAME" bash -c "
+            source /ws_aic/install/setup.bash
+            export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+            unset DISPLAY
+            python3 /tmp/image_relay_node.py \
+                >> /root/aic_results/image_relay.log 2>&1
+        "
+        echo "[$NAME] image_relay_node launched"
+    done
+fi
+
+# --- Stage 3b: launch the policy inside each container ---
 for NAME in "${worker_names[@]}"; do
     ${DOCKER} exec -d "$NAME" bash -c "
         source /ws_aic/install/setup.bash
