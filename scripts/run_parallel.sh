@@ -1,111 +1,104 @@
 #!/bin/bash
-# Run N aic_eval containers in parallel, each evaluating a chunk of trials
-# produced by scripts/split_trials.py.
+# Single-worker AIC eval launcher that mirrors the working 3-terminal Lambda
+# manual flow:
+#   T1: aic_eval container — start_aic_engine:=true gazebo_gui:=false
+#       launch_rviz:=false (with shutdown_on_aic_engine_exit:=true added so
+#       this script can wait + clean up automatically).
+#   T2: host policy via `pixi run ros2 run aic_model …`.
+#   T3: host image_relay via system ROS (`source /opt/ros/kilted/setup.bash`).
 #
-# Designed for a Lambda Cloud GPU instance prepared per
-# docs/lambda_headless_setup.md — i.e., the host has matching
-# libnvidia-gl-*-server packages installed and NVIDIA Container Toolkit
-# is configured.
-#
-# Default sizing targets a 1× A100 40 GB / 30 vCPU / 200 GB RAM Lambda
-# instance: 6 workers × (5 CPUs, 32 GB RAM) = 30 CPU / 192 GB,
-# leaving ~8 GB host headroom. A100 40 GB VRAM is non-binding (~1-2 GB
-# per headless gz-sim worker). Override N on the CLI and per-worker
-# limits via WORKER_CPUS / WORKER_MEM (see below).
-#
-# Each worker:
-#   * runs as its own Docker container with its own network namespace
-#     (default bridge), so port 7447 inside one container does not collide
-#     with port 7447 inside another;
-#   * mounts a unique split config at /tmp/aic_config.yaml, a unique
-#     host results dir at /root/aic_results, and the host-side
-#     image_relay_node.py at /tmp/image_relay_node.py;
-#   * launches image_relay_node (downscale + JPEG re-encode of camera
-#     topics → ~160× smaller MCAP bags; see Step 8 of
-#     docs/lambda_headless_setup.md) and the policy via `docker exec`
-#     after the eval's Zenoh router comes up, so eval + relay + policy
-#     all share the container's loopback.
-#
-# Workers self-terminate after their last trial because we pass
-# `shutdown_on_aic_engine_exit:=true` to /entrypoint.sh.
+# Designed for the Lambda 1× A100 40 GB / 30 vCPU / 200 GB RAM instance:
+# the container gets --cpus 30 --memory 192g (≈8 GB host headroom) and uses
+# --network host so the host-side policy + relay can reach the container's
+# Zenoh router on 127.0.0.1:7447. This locks the script to one worker per
+# host — port 7447 is a single fixed slot under host networking.
 #
 # Usage:
-#   # 1. Split the trial config (match --num-parts to N below):
-#   pixi run python scripts/split_trials.py \
-#       --input aic_engine/config/train.yaml \
-#       --output-dir ~/aic_split_configs \
-#       --num-parts 6
+#   bash scripts/run_parallel.sh
 #
-#   # 2. Run the workers (defaults to 6 on the A100 40 GB instance):
-#   bash scripts/run_parallel.sh 6
-#
-#   # 3. Merge the per-worker score files:
-#   pixi run python scripts/merge_scores.py --results-root ~
+#   # With overrides:
+#   POLICY=aic_example_policies.ros.WaveArm GROUND_TRUTH=false \
+#       bash scripts/run_parallel.sh
 #
 # Environment overrides (all optional):
-#   IMAGE          eval Docker image       (default: ghcr.io/shu4dev/aic-eval:v1)
-#   CONFIGS_DIR    where the splits live   (default: $HOME/aic_split_configs)
-#   POLICY         policy module path      (default: aic_example_policies.ros.SCCheatCode)
-#   RESULTS_BASE   per-worker results root (default: $HOME/aic_results_<i>)
-#   RECORDING_DIR  optional MCAP root      (if set, mounts to /root/aic_recordings)
-#   AIC_IMAGE_SCALE  passed into the policy environment (default: unset)
-#   GROUND_TRUTH   ground_truth launch arg (default: true — required for recording)
-#   WORKER_CPUS    --cpus per container    (default: 5      → 6×5 = 30 vCPU)
-#   WORKER_MEM     --memory per container  (default: 32g    → 6×32 = 192 GB)
-#   IMAGE_RELAY    launch image_relay_node inside each worker
-#                                          (default: 1; set to 0 to skip)
-#   RELAY_NODE     host path to image_relay_node.py
-#                                          (default: alongside this script)
+#   IMAGE            eval Docker image    (default: ghcr.io/shu4dev/aic-eval:v1)
+#   POLICY           policy module path   (default: aic_example_policies.ros.SCCheatCode)
+#   GROUND_TRUTH     ground_truth arg     (default: true)
+#   RESULTS          host results dir     (default: $HOME/aic_results)
+#   RECORDING_DIR    optional MCAP root   (mounted at /root/aic_recordings)
+#   AIC_IMAGE_SCALE  passed to container env (default: unset)
+#   NAME             container name       (default: aic_worker)
+#   WORKER_CPUS      --cpus per container (default: 30)
+#   WORKER_MEM       --memory per container (default: 192g)
+#   RELAY_NODE       host path to image_relay_node.py
+#                                         (default: alongside this script)
+#   ROS_SETUP        system ROS setup     (default: /opt/ros/kilted/setup.bash)
 #
 # Notes:
-#   * The default IMAGE is a private GHCR repo. Log in once before running:
+#   * The default IMAGE is a private GHCR repo. Log in once:
 #       echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u shu4dev --password-stdin
-#     (matches Step 4 of docs/lambda_headless_setup.md). Otherwise the first
-#     `docker run` fails with "pull access denied" / "manifest unknown".
-#   * `--gpus all` + NVIDIA_DRIVER_CAPABILITIES=all is required for Ogre2 to
-#     find the NVIDIA EGL ICD. See docs/lambda_headless_setup.md if you hit
-#     "OpenGL 3.3 is not supported" or "Found Num EGL Devices: 0".
-#   * image_relay runs inside each container (not on the host as in Step 8 of
-#     the doc) because each worker has its own Zenoh router on its own
-#     container-local loopback — host-side relay can only see one worker.
-#     Container-side launch shares the eval router's UTS/IPC namespace, so
-#     Zenoh shared-memory works and ZENOH_CONFIG_OVERRIDE is not needed.
-#   * Use `sudo docker logs -f aic_worker_<i>` to tail any worker live.
+#     (see Step 4 of docs/lambda_headless_setup.md).
+#   * --gpus all + NVIDIA_DRIVER_CAPABILITIES=all is required for Ogre2 / EGL.
+#   * `pixi_env_setup.sh` already exports RMW_IMPLEMENTATION=rmw_zenoh_cpp and
+#     ZENOH_CONFIG_OVERRIDE=transport/shared_memory/enabled=false, so `pixi run`
+#     gets those for free (matches T2 in the manual flow — no explicit exports
+#     needed there). The host image_relay does need explicit RMW/Zenoh exports
+#     because it sources /opt/ros/kilted, not pixi — matches T3.
+#   * Tail logs at $RESULTS/{policy.log,image_relay.log}, or
+#     `sudo docker logs -f $NAME` for the eval engine.
+#   * Ctrl-C is safe: the EXIT trap kills the host policy/relay and force-rms
+#     the container.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-N="${1:-6}"
 IMAGE="${IMAGE:-ghcr.io/shu4dev/aic-eval:v1}"
-CONFIGS_DIR="${CONFIGS_DIR:-$HOME/aic_split_configs}"
 POLICY="${POLICY:-aic_example_policies.ros.SCCheatCode}"
 GROUND_TRUTH="${GROUND_TRUTH:-true}"
-PREFIX="${PREFIX:-train_part}"
-WORKER_CPUS="${WORKER_CPUS:-5}"
-WORKER_MEM="${WORKER_MEM:-32g}"
-IMAGE_RELAY="${IMAGE_RELAY:-1}"
+RESULTS="${RESULTS:-$HOME/aic_results}"
+NAME="${NAME:-aic_worker}"
+WORKER_CPUS="${WORKER_CPUS:-30}"
+WORKER_MEM="${WORKER_MEM:-192g}"
 RELAY_NODE="${RELAY_NODE:-$SCRIPT_DIR/image_relay_node.py}"
-
-if [ "$IMAGE_RELAY" = "1" ] && [ ! -f "$RELAY_NODE" ]; then
-    echo "error: image_relay_node not found at $RELAY_NODE — set RELAY_NODE or IMAGE_RELAY=0" >&2
-    exit 1
-fi
+ROS_SETUP="${ROS_SETUP:-/opt/ros/kilted/setup.bash}"
 
 DOCKER="sudo docker"
-if ${DOCKER} info >/dev/null 2>&1; then :; else
+
+# --- Preflight -------------------------------------------------------------
+
+if ! ${DOCKER} info >/dev/null 2>&1; then
     echo "error: cannot run '${DOCKER} info' — is Docker running and do you have permission?" >&2
     exit 1
 fi
 
-if [ ! -d "$CONFIGS_DIR" ]; then
-    echo "error: $CONFIGS_DIR does not exist — run split_trials.py first" >&2
+if [ ! -f "$RELAY_NODE" ]; then
+    echo "error: image_relay_node not found at $RELAY_NODE — set RELAY_NODE" >&2
     exit 1
 fi
 
-# Verify the image is locally present or pullable. Catches "not logged in
-# to ghcr.io" up front with a clear message instead of letting the first
-# `docker run` in Stage 1 fail halfway through with "pull access denied".
+if [ ! -f "$ROS_SETUP" ]; then
+    echo "error: ROS setup not found at $ROS_SETUP — set ROS_SETUP" >&2
+    exit 1
+fi
+
+if ! command -v pixi >/dev/null 2>&1; then
+    echo "error: 'pixi' not found on PATH — needed for the host policy launch (T2)" >&2
+    exit 1
+fi
+
+# Port 7447 must be free on the host, otherwise --network host launches a
+# container whose Zenoh router silently fails to bind and the wait loop hangs.
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE '[:.]7447$'; then
+    echo "error: something is already listening on 127.0.0.1:7447 — free it first." >&2
+    echo "       (Likely a leftover run; try: ${DOCKER} rm -f $NAME)" >&2
+    exit 1
+fi
+
+# Verify the image is locally present or pullable. Catches "not logged in to
+# ghcr.io" up front with a clear message instead of letting `docker run` fail
+# halfway through with "pull access denied".
 if ! ${DOCKER} image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "Pulling $IMAGE ..."
     if ! ${DOCKER} pull "$IMAGE"; then
@@ -118,135 +111,125 @@ if ! ${DOCKER} image inspect "$IMAGE" >/dev/null 2>&1; then
     fi
 fi
 
-echo "=== Parallel AIC eval ==="
-echo "Workers:     $N"
-echo "Image:       $IMAGE"
-echo "Splits dir:  $CONFIGS_DIR"
-echo "Policy:      $POLICY"
+mkdir -p "$RESULTS"
+
+echo "=== Single-worker AIC eval ==="
+echo "Image:        $IMAGE"
+echo "Policy:       $POLICY (host pixi)"
 echo "ground_truth: $GROUND_TRUTH"
-echo "Per-worker:  --cpus=$WORKER_CPUS --memory=$WORKER_MEM"
-echo "Image relay: $([ "$IMAGE_RELAY" = "1" ] && echo "on ($RELAY_NODE)" || echo "off")"
+echo "Results:      $RESULTS"
+echo "Container:    $NAME (--network host, --cpus=$WORKER_CPUS --memory=$WORKER_MEM)"
+echo "Relay:        $RELAY_NODE (host, ROS @ $ROS_SETUP)"
 echo ""
 
-# --- Stage 1: start N detached eval containers ---
-worker_names=()
-for i in $(seq 0 $((N-1))); do
-    NAME="aic_worker_$i"
-    RESULTS="${RESULTS_BASE:-$HOME/aic_results}_$i"
-    CONFIG_HOST="$CONFIGS_DIR/${PREFIX}_$i.yaml"
+# --- Stage 1: launch eval container (mirrors T1) --------------------------
 
-    if [ ! -f "$CONFIG_HOST" ]; then
-        echo "error: split config missing: $CONFIG_HOST" >&2
-        exit 1
-    fi
+${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
 
-    mkdir -p "$RESULTS"
-    ${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
-
-    recording_args=()
-    if [ -n "${RECORDING_DIR:-}" ]; then
-        REC_HOST="${RECORDING_DIR}_$i"
-        mkdir -p "$REC_HOST"
-        recording_args=(-v "$REC_HOST:/root/aic_recordings" -e "AIC_RECORDING_DIR=/root/aic_recordings")
-    fi
-
-    image_scale_args=()
-    if [ -n "${AIC_IMAGE_SCALE:-}" ]; then
-        image_scale_args=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
-    fi
-
-    relay_mount_args=()
-    if [ "$IMAGE_RELAY" = "1" ]; then
-        relay_mount_args=(-v "$RELAY_NODE:/tmp/image_relay_node.py:ro")
-    fi
-
-    ${DOCKER} run -d --rm \
-        --name "$NAME" \
-        --gpus all \
-        --cpus "$WORKER_CPUS" \
-        --memory "$WORKER_MEM" \
-        --env NVIDIA_DRIVER_CAPABILITIES=all \
-        --env NVIDIA_VISIBLE_DEVICES=all \
-        --env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
-        --user root \
-        -v "$RESULTS:/root/aic_results" \
-        -v "$CONFIG_HOST:/tmp/aic_config.yaml:ro" \
-        -e AIC_RESULTS_DIR=/root/aic_results \
-        "${recording_args[@]}" \
-        "${image_scale_args[@]}" \
-        "${relay_mount_args[@]}" \
-        "$IMAGE" \
-        aic_engine_config_file:=/tmp/aic_config.yaml \
-        ground_truth:="$GROUND_TRUTH" \
-        gazebo_gui:=false launch_rviz:=false \
-        start_aic_engine:=true \
-        shutdown_on_aic_engine_exit:=true \
-        >/dev/null
-
-    echo "[$NAME] started — config=$(basename $CONFIG_HOST) results=$RESULTS"
-    worker_names+=("$NAME")
-done
-
-# --- Stage 2: wait for each worker's Zenoh router (port 7447, inside the container) ---
-for NAME in "${worker_names[@]}"; do
-    echo -n "[$NAME] waiting for Zenoh "
-    for _ in $(seq 1 90); do
-        if ${DOCKER} exec "$NAME" bash -c '
-            command -v nc >/dev/null && nc -z 127.0.0.1 7447 ||
-            (echo > /dev/tcp/127.0.0.1/7447) 2>/dev/null
-        ' 2>/dev/null; then
-            echo "✓"
-            break
-        fi
-        echo -n "."
-        sleep 2
-    done
-done
-
-# --- Stage 3a: launch image_relay_node inside each container ---
-# Must come up before the policy so /<cam>/image_small is being
-# published by the time the eval engine starts recording (per Step 8 of
-# docs/lambda_headless_setup.md). Container-local: each worker has its
-# own Zenoh router on its own loopback, so one relay per container.
-if [ "$IMAGE_RELAY" = "1" ]; then
-    for NAME in "${worker_names[@]}"; do
-        ${DOCKER} exec -d "$NAME" bash -c "
-            source /ws_aic/install/setup.bash
-            export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-            unset DISPLAY
-            python3 /tmp/image_relay_node.py \
-                >> /root/aic_results/image_relay.log 2>&1
-        "
-        echo "[$NAME] image_relay_node launched"
-    done
+recording_args=()
+if [ -n "${RECORDING_DIR:-}" ]; then
+    mkdir -p "$RECORDING_DIR"
+    recording_args=(-v "$RECORDING_DIR:/root/aic_recordings" -e "AIC_RECORDING_DIR=/root/aic_recordings")
 fi
 
-# --- Stage 3b: launch the policy inside each container ---
-for NAME in "${worker_names[@]}"; do
-    ${DOCKER} exec -d "$NAME" bash -c "
-        source /ws_aic/install/setup.bash
-        export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-        unset DISPLAY
-        ros2 run aic_model aic_model --ros-args \
-            -p use_sim_time:=true \
-            -p policy:=$POLICY \
-            >> /root/aic_results/policy.log 2>&1
-    "
-    echo "[$NAME] policy ($POLICY) launched"
+image_scale_args=()
+if [ -n "${AIC_IMAGE_SCALE:-}" ]; then
+    image_scale_args=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
+fi
+
+${DOCKER} run -d --rm \
+    --name "$NAME" \
+    --network host \
+    --gpus all \
+    --cpus "$WORKER_CPUS" \
+    --memory "$WORKER_MEM" \
+    --env NVIDIA_DRIVER_CAPABILITIES=all \
+    --env NVIDIA_VISIBLE_DEVICES=all \
+    --env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
+    --user root \
+    -v "$RESULTS:/root/aic_results" \
+    -e AIC_RESULTS_DIR=/root/aic_results \
+    "${recording_args[@]}" \
+    "${image_scale_args[@]}" \
+    "$IMAGE" \
+    ground_truth:="$GROUND_TRUTH" \
+    gazebo_gui:=false launch_rviz:=false \
+    start_aic_engine:=true \
+    shutdown_on_aic_engine_exit:=true \
+    >/dev/null
+
+echo "[$NAME] started"
+
+# --- Cleanup trap ---------------------------------------------------------
+
+RELAY_PID=""
+POLICY_PID=""
+
+cleanup() {
+    if [ -n "$POLICY_PID" ]; then kill "$POLICY_PID" 2>/dev/null || true; fi
+    if [ -n "$RELAY_PID" ];  then kill "$RELAY_PID"  2>/dev/null || true; fi
+    ${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+# --- Stage 2: wait for Zenoh on host 127.0.0.1:7447 -----------------------
+
+echo -n "[$NAME] waiting for Zenoh "
+zenoh_up=0
+for _ in $(seq 1 90); do
+    if (echo > /dev/tcp/127.0.0.1/7447) 2>/dev/null; then
+        echo "✓"
+        zenoh_up=1
+        break
+    fi
+    echo -n "."
+    sleep 2
 done
 
-# --- Stage 4: wait for every container to self-terminate ---
-echo ""
-echo "All workers running. Waiting for them to finish..."
-for NAME in "${worker_names[@]}"; do
-    ${DOCKER} wait "$NAME" >/dev/null
-    echo "[$NAME] done"
-done
+if [ "$zenoh_up" = "0" ]; then
+    echo ""
+    echo "error: Zenoh router on 127.0.0.1:7447 never came up — check '${DOCKER} logs $NAME'" >&2
+    exit 1
+fi
 
-# --- Summary ---
+# --- Stage 3a: launch image_relay on host (mirrors T3) --------------------
+
+RELAY_LOG="$RESULTS/image_relay.log"
+(
+    # shellcheck disable=SC1090
+    source "$ROS_SETUP"
+    export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+    export ZENOH_CONFIG_OVERRIDE="transport/shared_memory/enabled=false"
+    exec python3 "$RELAY_NODE"
+) >> "$RELAY_LOG" 2>&1 &
+RELAY_PID=$!
+echo "[$NAME] image_relay launched (PID $RELAY_PID, log $RELAY_LOG)"
+
+# --- Stage 3b: launch policy on host (mirrors T2) -------------------------
+
+POLICY_LOG="$RESULTS/policy.log"
+(
+    cd "$REPO_ROOT"
+    exec pixi run ros2 run aic_model aic_model --ros-args \
+        -p use_sim_time:=true \
+        -p policy:="$POLICY"
+) >> "$POLICY_LOG" 2>&1 &
+POLICY_PID=$!
+echo "[$NAME] policy launched: $POLICY (PID $POLICY_PID, log $POLICY_LOG)"
+
+# --- Stage 4: wait for the eval container to self-terminate ---------------
+
 echo ""
-echo "=== All workers finished ==="
-ls -lh "${RESULTS_BASE:-$HOME/aic_results}"_*/score.yaml 2>/dev/null || \
-    echo "(no score.yaml files found — check per-worker logs)"
+echo "Waiting for $NAME to finish..."
+${DOCKER} wait "$NAME" >/dev/null
+echo "[$NAME] done"
+
+# --- Summary --------------------------------------------------------------
+
 echo ""
-echo "Next: pixi run python scripts/merge_scores.py --results-root \$HOME"
+echo "=== Run finished ==="
+if [ -f "$RESULTS/score.yaml" ]; then
+    ls -lh "$RESULTS/score.yaml"
+else
+    echo "(no score.yaml in $RESULTS — check $POLICY_LOG, $RELAY_LOG, and '${DOCKER} logs $NAME')"
+fi
