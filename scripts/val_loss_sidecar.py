@@ -124,7 +124,13 @@ def extract_loss(output) -> float:
 
 
 def compute_val_loss(policy, val_loader, device) -> float:
-    policy.eval()
+    # NOTE: train() mode, not eval(). ACT's CVAE encoder is gated on
+    # self.training — in eval() the encoder is skipped and (mu, log_sigma)
+    # come back as None, but ACTPolicy.forward still computes the KL term
+    # and crashes on `1 + None`. train() + no_grad() runs the full encoder
+    # without gradients; dropout/BN are active (adds a little noise) but
+    # the loss is still a valid trend signal across checkpoints.
+    policy.train()
     losses: list[float] = []
     with torch.no_grad():
         for batch in val_loader:
