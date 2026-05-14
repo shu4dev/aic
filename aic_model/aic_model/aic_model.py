@@ -164,7 +164,7 @@ class AicModel(LifecycleNode):
 
     def insert_cable_goal_callback(self, goal_request):
         if not self.is_active:
-            self.get_logger().error("aic_model lifecycle is not in the active state")
+            self.get_logger().debug("insert_cable goal received before activation — rejecting")
             return GoalResponse.REJECT
 
         if self.goal_handle is not None and self.goal_handle.is_active:

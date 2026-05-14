@@ -58,8 +58,10 @@
 #                    sharing mounted storage don't clobber each other. Auto-
 #                    derived from PART_FILE's trailing _<int> when unset.
 #   RESULTS          host results dir     (default: /home/ubuntu/aic-data — mounted FS;
-#                                          suffixed with /aic_results_<i> when PART_INDEX is set)
-#   RECORDING_DIR    optional MCAP root   (mounted at /root/aic_recordings)
+#                                          suffixed with /aic_results_<i> when PART_INDEX is set).
+#                                          aic_engine writes both score.yaml AND
+#                                          per-trial bags (bag_trial_<id>_<ts>/)
+#                                          into this dir via AIC_RESULTS_DIR.
 #   AIC_IMAGE_SCALE  passed to container env (default: unset)
 #   NAME             container name       (default: aic_worker; suffixed with _<i> when PART_INDEX is set)
 #   ROUTER_PORT      Zenoh router host port (default: 7447, or 7447+PART_INDEX
@@ -94,6 +96,21 @@
 #     `sudo docker logs -f $NAME` for the eval engine.
 #   * Ctrl-C is safe: the EXIT trap kills the host policy/relay and force-rms
 #     the container.
+#
+# Bag collection:
+#   This script's main output (besides score.yaml) is the per-trial MCAP bags
+#   that aic_engine writes for downstream LeRobot conversion. Each trial in the
+#   active config produces a directory of the shape:
+#
+#       $RESULTS/bag_trial_<id>_<timestamp>/<file>.mcap
+#
+#   In single-worker mode that's /home/ubuntu/aic-data/bag_trial_*/. In multi-
+#   worker mode it's /home/ubuntu/aic-data/aic_results_<i>/bag_trial_*/. Both
+#   land on the mounted aic-data filesystem so the host disk doesn't fill up.
+#
+#   To convert collected bags to LeRobot training format:
+#       pixi run python scripts/mcap_to_lerobot.py <bag_dir_or_glob> ...
+#   See scripts/mcap_to_lerobot.py --help for trimming / resolution options.
 
 set -euo pipefail
 
@@ -230,12 +247,6 @@ echo ""
 
 ${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
 
-recording_args=()
-if [ -n "${RECORDING_DIR:-}" ]; then
-    mkdir -p "$RECORDING_DIR"
-    recording_args=(-v "$RECORDING_DIR:/root/aic_recordings" -e "AIC_RECORDING_DIR=/root/aic_recordings")
-fi
-
 image_scale_args=()
 if [ -n "${AIC_IMAGE_SCALE:-}" ]; then
     image_scale_args=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
@@ -271,7 +282,6 @@ ${DOCKER} run -d --rm \
     --user root \
     -v "$RESULTS:/root/aic_results" \
     -e AIC_RESULTS_DIR=/root/aic_results \
-    "${recording_args[@]}" \
     "${image_scale_args[@]}" \
     "${part_mount_args[@]}" \
     "$IMAGE" \
