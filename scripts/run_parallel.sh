@@ -73,6 +73,10 @@
 #                                          set to ⌊192/N⌋g for the same reason)
 #   RELAY_NODE       host path to image_relay_node.py
 #                                         (default: alongside this script)
+#   RELAY_VENV       Python venv that image_relay_node.py needs activated
+#                    (for cv2/numpy). Sourced after ROS_SETUP so the venv's
+#                    python3 wins in PATH.
+#                                         (default: $HOME/ws_aic/src/aic/.venv)
 #   ROS_SETUP        system ROS setup     (default: /opt/ros/kilted/setup.bash)
 #
 # Notes:
@@ -105,6 +109,7 @@ ROUTER_PORT="${ROUTER_PORT:-}"
 WORKER_CPUS="${WORKER_CPUS:-30}"
 WORKER_MEM="${WORKER_MEM:-192g}"
 RELAY_NODE="${RELAY_NODE:-$SCRIPT_DIR/image_relay_node.py}"
+RELAY_VENV="${RELAY_VENV:-$HOME/ws_aic/src/aic/.venv}"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/kilted/setup.bash}"
 
 # Auto-derive PART_INDEX from PART_FILE basename (e.g. train_part_3.yaml → 3)
@@ -152,6 +157,14 @@ fi
 
 if [ ! -f "$RELAY_NODE" ]; then
     echo "error: image_relay_node not found at $RELAY_NODE — set RELAY_NODE" >&2
+    exit 1
+fi
+
+# image_relay_node imports cv2/numpy from a venv at ws_aic/src/aic/.venv; the
+# activate script must exist or the relay subshell will run with the system
+# python and crash on import.
+if [ ! -f "$RELAY_VENV/bin/activate" ]; then
+    echo "error: relay venv activate script not found at $RELAY_VENV/bin/activate — set RELAY_VENV" >&2
     exit 1
 fi
 
@@ -321,6 +334,11 @@ RELAY_LOG="$RESULTS/image_relay.log"
 (
     # shellcheck disable=SC1090
     source "$ROS_SETUP"
+    # Activate the ws_aic venv AFTER ROS setup so $RELAY_VENV/bin/python3 wins
+    # in PATH while PYTHONPATH still contains the ROS python dirs (rclpy lives
+    # there, cv2/numpy live in the venv).
+    # shellcheck disable=SC1091
+    source "$RELAY_VENV/bin/activate"
     export RMW_IMPLEMENTATION=rmw_zenoh_cpp
     export ZENOH_CONFIG_OVERRIDE="$HOST_ZENOH_OVERRIDE"
     exec python3 "$RELAY_NODE"
