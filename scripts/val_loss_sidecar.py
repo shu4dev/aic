@@ -51,11 +51,29 @@ except ImportError:
         sys.exit(1)
 
 
+def find_train_config(train_output: Path) -> Path | None:
+    """Locate train_config.json. Older lerobot wrote it at the output root;
+    0.5.x writes it inside each checkpoint dir. Return the first one found,
+    preferring the output-root copy."""
+    root_cfg = train_output / "train_config.json"
+    if root_cfg.exists():
+        return root_cfg
+    ckpt_dir = train_output / "checkpoints"
+    if ckpt_dir.exists():
+        candidates = sorted(ckpt_dir.glob("*/pretrained_model/train_config.json"))
+        if candidates:
+            return candidates[0]
+    return None
+
+
 def find_dataset_root(train_output: Path) -> Path:
     """Discover the dataset root from the training config that lerobot-train writes."""
-    cfg_path = train_output / "train_config.json"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Missing {cfg_path}")
+    cfg_path = find_train_config(train_output)
+    if cfg_path is None:
+        raise FileNotFoundError(
+            f"No train_config.json under {train_output} (checked root and "
+            f"checkpoints/*/pretrained_model/)"
+        )
     cfg = json.load(open(cfg_path))
     ds_cfg = cfg.get("dataset", {})
     root = ds_cfg.get("root") or ds_cfg.get("dataset_root")
@@ -142,23 +160,32 @@ def main():
     train_output = args.train_output.resolve()
     print(f"Sidecar watching: {train_output}", flush=True)
 
-    # lerobot-train writes train_config.json after dataset init, which on PyAV +
-    # a large LeRobot dataset can take 10-20 min. Default wait: 1 h, override via flag.
-    cfg_path = train_output / "train_config.json"
+    # Wait for train_config.json. Older lerobot wrote it at the output root after
+    # dataset init; 0.5.x only writes it inside each saved checkpoint dir, so we
+    # accept either location. PyAV + a large dataset can take 10-20 min before
+    # the first checkpoint, so default wait is 1 h (override via --config-timeout).
     deadline = time.time() + args.config_timeout
     waited = 0
-    while not cfg_path.exists() and time.time() < deadline:
+    cfg_path = find_train_config(train_output)
+    while cfg_path is None and time.time() < deadline:
         time.sleep(5)
         waited += 5
         if waited % 60 == 0:
-            print(f"  still waiting for {cfg_path.name} ({waited // 60} min elapsed, "
-                  f"{int(args.config_timeout) // 60} min timeout)", flush=True)
-    if not cfg_path.exists():
+            print(f"  still waiting for train_config.json "
+                  f"({waited // 60} min elapsed, "
+                  f"{int(args.config_timeout) // 60} min timeout). Searched "
+                  f"{train_output}/train_config.json and "
+                  f"{train_output}/checkpoints/*/pretrained_model/train_config.json",
+                  flush=True)
+        cfg_path = find_train_config(train_output)
+    if cfg_path is None:
         sys.stderr.write(
-            f"Timeout: no {cfg_path} after {int(args.config_timeout) // 60} min — "
-            f"is training running? Bump --config-timeout if dataset init is slow.\n"
+            f"Timeout: no train_config.json under {train_output} after "
+            f"{int(args.config_timeout) // 60} min — is training running? "
+            f"Bump --config-timeout if dataset init is slow.\n"
         )
         sys.exit(1)
+    print(f"Found config:  {cfg_path}", flush=True)
 
     dataset_root = find_dataset_root(train_output)
     val_episodes, n_total = load_val_episodes(dataset_root)
