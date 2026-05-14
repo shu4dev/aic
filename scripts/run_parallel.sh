@@ -280,6 +280,7 @@ ${DOCKER} run -d --rm \
     --env NVIDIA_VISIBLE_DEVICES=all \
     --env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
     --user root \
+    --ipc=host \
     -v "$RESULTS:/root/aic_results" \
     -e AIC_RESULTS_DIR=/root/aic_results \
     "${image_scale_args[@]}" \

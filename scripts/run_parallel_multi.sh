@@ -43,9 +43,14 @@
 #   RESULTS_BASE     parent dir for per-worker aic_results_<i>/
 #                                               (default: /home/ubuntu/aic-data)
 #   MERGED_OUTPUT    final merged scores YAML   (default: $RESULTS_BASE/merged_score.yaml)
-#   STAGGER_SECS     seconds to wait between worker launches so their Zenoh
-#                    routers and Gazebo init don't all hammer the GPU/CPU at
-#                    the same instant. Default: 5.
+#   STAGGER_SECS     seconds to wait between worker launches. Must be wide
+#                    enough that the previous worker's Gazebo is past its
+#                    Ogre2/EGL init by the time the next one starts — two
+#                    concurrent NVIDIA EGL inits on one A100 segfault the
+#                    component_container with "unable to find OpenGL 3+
+#                    Rendering Subsystem". Empirically ~30s clears Gazebo's
+#                    render-engine load; bump higher if Ogre2 still crashes.
+#                    Default: 30.
 #   HOST_CPUS        cores available to split   (default: 30)
 #   HOST_MEM_GB      GB of RAM available to split (default: 192)
 #   WORKER_CPUS      per-worker --cpus override (default: ⌊HOST_CPUS/N⌋)
@@ -63,7 +68,7 @@ INPUT_CONFIG="${INPUT_CONFIG:-$REPO_ROOT/aic_engine/config/train.yaml}"
 SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs}"
 RESULTS_BASE="${RESULTS_BASE:-/home/ubuntu/aic-data}"
 MERGED_OUTPUT="${MERGED_OUTPUT:-$RESULTS_BASE/merged_score.yaml}"
-STAGGER_SECS="${STAGGER_SECS:-5}"
+STAGGER_SECS="${STAGGER_SECS:-30}"
 HOST_CPUS="${HOST_CPUS:-30}"
 HOST_MEM_GB="${HOST_MEM_GB:-192}"
 
