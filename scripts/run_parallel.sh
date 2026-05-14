@@ -204,6 +204,17 @@ if ! command -v pixi >/dev/null 2>&1; then
     exit 1
 fi
 
+# Zombie cleanup from prior failed runs. If a previous invocation got SIGKILLed
+# (or a parent pixi run leaked a child), the leftover aic_model process keeps
+# announcing itself on the host Zenoh fabric — aic_engine then fails the first
+# trial with "More than one node with name 'aic_model' found". Same story for a
+# leftover image_relay. Belt-and-suspenders: pkill them by command pattern so
+# we start from a clean fabric.
+pkill -f 'aic_model'                  2>/dev/null || true
+pkill -f "$RELAY_NODE"                2>/dev/null || true
+# Give the OS a moment to actually reap them.
+sleep 1
+
 # The chosen ROUTER_PORT must be free on the host. For worker 0 (port 7447 with
 # --network host) the container binds directly; for workers ≥1 the bridge port
 # mapping needs the host slot free. Either way, a port in use means a stale
@@ -278,8 +289,12 @@ echo "[$NAME] container started"
 # launch's stdout/stderr straight into engine.log. We `wait` on this PID in
 # Stage 4 instead of `docker wait`-ing the whole container — the container
 # itself persists across runs so it can be re-used by the next invocation.
+# Note: NO `-u root`. distrobox sets the container up around the `ubuntu`
+# user (group memberships for /dev/dri/*, bashrc env, etc.); running as root
+# bypasses that and Ogre2 fails with `unable to find OpenGL 3+ Rendering
+# Subsystem` even though the bind-mounted libs are physically present.
 ENGINE_LOG="$RESULTS/engine.log"
-${DOCKER} exec -u root \
+${DOCKER} exec \
     "${exec_env_args[@]}" \
     "$NAME" \
     /entrypoint.sh \
