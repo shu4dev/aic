@@ -284,6 +284,14 @@ ${DOCKER} run -d --rm \
 
 echo "[$NAME] started"
 
+# Stream the container's stdout/stderr to engine.log live, so the file is
+# tailable while the container is still running (essential for debugging
+# hangs — `docker wait` blocks indefinitely if aic_engine never self-exits).
+# `docker logs -f` returns its own exit when the container is removed.
+ENGINE_LOG="$RESULTS/engine.log"
+${DOCKER} logs -f "$NAME" > "$ENGINE_LOG" 2>&1 &
+ENGINE_LOG_PID=$!
+
 # --- Cleanup trap ---------------------------------------------------------
 
 RELAY_PID=""
@@ -292,6 +300,7 @@ POLICY_PID=""
 cleanup() {
     if [ -n "$POLICY_PID" ]; then kill "$POLICY_PID" 2>/dev/null || true; fi
     if [ -n "$RELAY_PID" ];  then kill "$RELAY_PID"  2>/dev/null || true; fi
+    if [ -n "${ENGINE_LOG_PID:-}" ]; then kill "$ENGINE_LOG_PID" 2>/dev/null || true; fi
     ${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -374,14 +383,15 @@ echo "[$NAME] policy launched: $POLICY (PID $POLICY_PID, log $POLICY_LOG)"
 
 echo ""
 echo "Waiting for $NAME to finish..."
+echo "  (Tail aic_engine's view live: tail -f $ENGINE_LOG)"
 ${DOCKER} wait "$NAME" >/dev/null
 echo "[$NAME] done"
 
-# Capture the eval engine's stdout/stderr before the container is reaped.
-# `docker logs` still works against a finished --rm container while we hold a
-# handle, and this is the only place to grab aic_engine's view for postmortem.
-ENGINE_LOG="$RESULTS/engine.log"
-${DOCKER} logs "$NAME" > "$ENGINE_LOG" 2>&1 || true
+# The background `docker logs -f` started right after `docker run` has already
+# streamed everything to $ENGINE_LOG; wait for it to drain once the container
+# is gone so we don't miss the tail end. The cleanup trap will kill it if it
+# somehow hasn't exited on its own.
+wait "$ENGINE_LOG_PID" 2>/dev/null || true
 
 # --- Summary --------------------------------------------------------------
 
