@@ -855,6 +855,21 @@ def streaming_convert_episode(
     action_msgs: list[tuple[float, Any]] = []
     fts_msgs: list[tuple[float, Any]] = []
 
+    # Per-topic seen-stamp sets. AIC bags from accumulated-publisher trials
+    # contain N identical copies of every header-stamped message (one per
+    # leaked publisher). Without dedup the *_msgs lists scale with N×count
+    # and OOM workers on big bags; with dedup they scale with unique stamps.
+    # Stamp tuples are (sec, nanosec) for exact-equality dedup matching the
+    # converter's downstream behavior (which also keys off header.stamp).
+    seen_js: set[tuple[int, int]] = set()
+    seen_ctrl: set[tuple[int, int]] = set()
+    seen_action: set[tuple[int, int]] = set()
+    seen_fts: set[tuple[int, int]] = set()
+
+    def _stamp_key(msg) -> tuple[int, int]:
+        s = msg.header.stamp
+        return (s.sec, s.nanosec)
+
     with open(mcap_path, "rb") as f:
         reader = make_reader(f, decoder_factories=[DecoderFactory()])
         for schema, channel, message, decoded_msg in reader.iter_decoded_messages(
@@ -867,12 +882,34 @@ def streaming_convert_episode(
             # cartesian_pose). JointMotionUpdate has no header field, so an
             # unconditional _hdr_stamp would crash on those.
             if topic == TOPIC_JOINT_STATES:
+                key = _stamp_key(decoded_msg)
+                if key in seen_js:
+                    continue
+                seen_js.add(key)
                 joint_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
             elif topic == TOPIC_CONTROLLER_STATE:
+                key = _stamp_key(decoded_msg)
+                if key in seen_ctrl:
+                    continue
+                seen_ctrl.add(key)
                 ctrl_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
             elif topic == action_topic:
-                action_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
+                # Only dedup when action_topic is pose_commands (has header).
+                # joint_commands path uses JointMotionUpdate which has no
+                # header field — leave the existing behavior untouched.
+                if action_topic == TOPIC_POSE_COMMANDS:
+                    key = _stamp_key(decoded_msg)
+                    if key in seen_action:
+                        continue
+                    seen_action.add(key)
+                    action_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
+                else:
+                    action_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
             elif topic == TOPIC_FTS_WRENCH:
+                key = _stamp_key(decoded_msg)
+                if key in seen_fts:
+                    continue
+                seen_fts.add(key)
                 fts_msgs.append((_hdr_stamp(decoded_msg), decoded_msg))
 
     joint_msgs.sort(key=lambda x: x[0])
