@@ -1,0 +1,30 @@
+# Python dependencies for the scripts/ folder.
+#
+# Install with:
+#   pip install -r data_checl/aic/scripts/requirements.txt
+#
+# System packages (NOT installable via pip — install separately):
+#   - ffmpeg          : video encoding for mcap_to_lerobot.py and lerobot-train
+#                       Install with:  sudo apt install ffmpeg
+#   - rclpy / sensor_msgs : ROS 2 Python bindings used by image_relay_node.py
+#                       Installed via the ROS 2 workspace (ros-kilted-rclpy).
+#                       Not needed for diagnostic / conversion / training scripts.
+
+# ── Diagnostic scripts ──────────────────────────────────────────────────────
+# check_rtf.py, check_dedup.py, inspect_events.py
+# mcap_to_lerobot.py, mcap_to_lerobot_trimmed.py
+mcap>=1.2.0
+mcap-ros2-support>=0.5.0
+
+# ── Conversion (mcap_to_lerobot.py) ─────────────────────────────────────────
+# numpy pinned to match the repo's pixi.toml constraint (lerobot 0.5.1 compat)
+numpy<2.3.0
+opencv-python>=4.8.0
+pyarrow>=14.0.0
+pandas>=2.0.0
+PyYAML>=6.0
+
+# ── Training (train_lambda.sh → lerobot-train) ──────────────────────────────
+# lerobot pulls in: torch (CUDA), torchcodec, transformers, wandb, pyav, etc.
+lerobot==0.5.1
+wandb>=0.16.0
