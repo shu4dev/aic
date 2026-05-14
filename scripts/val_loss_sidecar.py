@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""
+val_loss_sidecar.py — Live validation loss tracking for lerobot-train.
+
+Watches <train_output>/checkpoints/ for newly written step-N directories.
+For each new checkpoint, loads the policy and runs a forward pass over
+the held-out val episodes (defined in <dataset_root>/meta/val_episodes.json),
+producing a single mean-loss number per checkpoint. Logs to:
+
+  - <train_output>/val_loss.jsonl  (one JSON line per checkpoint)
+  - WandB (attached to the same run as training, if --wandb-run-id given)
+
+Designed to run concurrently with lerobot-train on the same GPU. Adds
+~30 s to each checkpoint save (during which training pauses on GPU
+contention), so net training slowdown is ~1 %.
+
+Spawned automatically by scripts/train_lambda.sh when the dataset has a
+meta/val_episodes.json (i.e. when the converter was run with
+--val-fraction > 0). Safe to start manually too:
+
+    python val_loss_sidecar.py <train_output_dir> [--wandb-run-id ID]
+
+The sidecar is idempotent — restarting it skips checkpoints already in the
+JSONL. Stop with Ctrl-C; it cleans up the wandb attachment on exit.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader
+
+# lerobot reorganized its package layout between 0.4.x and 0.5.x. Try both.
+try:
+    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.common.policies.act.modeling_act import ACTPolicy
+except ImportError:
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        from lerobot.policies.act.modeling_act import ACTPolicy
+    except ImportError as e:
+        sys.stderr.write(
+            f"Cannot import lerobot APIs: {e}\n"
+            "Install lerobot in the active Python env (see requirements.txt).\n"
+        )
+        sys.exit(1)
+
+
+def find_dataset_root(train_output: Path) -> Path:
+    """Discover the dataset root from the training config that lerobot-train writes."""
+    cfg_path = train_output / "train_config.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Missing {cfg_path}")
+    cfg = json.load(open(cfg_path))
+    ds_cfg = cfg.get("dataset", {})
+    root = ds_cfg.get("root") or ds_cfg.get("dataset_root")
+    if not root:
+        raise KeyError(f"No dataset.root in {cfg_path}")
+    return Path(root)
+
+
+def load_val_episodes(dataset_root: Path) -> tuple[list[int], int]:
+    val_path = dataset_root / "meta" / "val_episodes.json"
+    if not val_path.exists():
+        raise FileNotFoundError(
+            f"No {val_path} — re-run converter with --val-fraction > 0"
+        )
+    data = json.load(open(val_path))
+    return data["val_episodes"], data.get("n_total", -1)
+
+
+def extract_loss(output) -> float:
+    """Pull the scalar loss from whatever the policy returned."""
+    if isinstance(output, dict):
+        if "loss" in output:
+            return float(output["loss"].item() if torch.is_tensor(output["loss"])
+                         else output["loss"])
+        for k in ("total_loss", "l1_loss", "action_loss"):
+            if k in output:
+                return float(output[k].item() if torch.is_tensor(output[k]) else output[k])
+    if hasattr(output, "loss"):
+        return float(output.loss.item() if torch.is_tensor(output.loss) else output.loss)
+    if torch.is_tensor(output):
+        return float(output.item())
+    raise TypeError(f"Cannot extract loss from {type(output).__name__}: {output}")
+
+
+def compute_val_loss(policy, val_loader, device) -> float:
+    policy.eval()
+    losses: list[float] = []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = {
+                k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
+                for k, v in batch.items()
+            }
+            try:
+                output = policy(batch)
+                losses.append(extract_loss(output))
+            except torch.cuda.OutOfMemoryError:
+                # Free what we can and keep going. The sidecar competes for VRAM
+                # with training; an occasional skipped batch is acceptable.
+                torch.cuda.empty_cache()
+                print("  WARN: CUDA OOM on val batch — skipped", flush=True)
+                continue
+    return sum(losses) / len(losses) if losses else float("nan")
+
+
+def step_from_ckpt_name(name: str):
+    """Checkpoint dirs are named by step number, possibly zero-padded."""
+    try:
+        return int(name)
+    except ValueError:
+        return None
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("train_output", type=Path,
+                   help="Directory created by lerobot-train (contains checkpoints/)")
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--poll-interval", type=float, default=10.0,
+                   help="Seconds between checkpoint-directory scans")
+    p.add_argument("--wandb-run-id", default=None,
+                   help="Attach to this wandb run (same one as training)")
+    p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "aic-act"))
+    p.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    args = p.parse_args()
+
+    train_output = args.train_output.resolve()
+    print(f"Sidecar watching: {train_output}", flush=True)
+
+    # lerobot-train writes train_config.json once it starts. Wait up to 10 min.
+    cfg_path = train_output / "train_config.json"
+    deadline = time.time() + 600
+    while not cfg_path.exists() and time.time() < deadline:
+        time.sleep(5)
+    if not cfg_path.exists():
+        sys.stderr.write(f"Timeout: no {cfg_path} after 10 min — is training running?\n")
+        sys.exit(1)
+
+    dataset_root = find_dataset_root(train_output)
+    val_episodes, n_total = load_val_episodes(dataset_root)
+    print(f"Dataset:       {dataset_root}", flush=True)
+    print(f"Val episodes:  {len(val_episodes)} of {n_total}", flush=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device:        {device}", flush=True)
+
+    print("Loading val dataset...", flush=True)
+    val_ds = LeRobotDataset(
+        repo_id=dataset_root.name,
+        root=str(dataset_root),
+        episodes=val_episodes,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        shuffle=False,
+        pin_memory=(device == "cuda"),
+    )
+    print(f"Val frames:    {len(val_ds)}", flush=True)
+
+    wandb_run = None
+    if args.wandb_run_id:
+        try:
+            import wandb
+            kwargs = {"id": args.wandb_run_id, "resume": "must"}
+            if args.wandb_project:
+                kwargs["project"] = args.wandb_project
+            if args.wandb_entity:
+                kwargs["entity"] = args.wandb_entity
+            wandb_run = wandb.init(**kwargs)
+            print(f"WandB attached to run {args.wandb_run_id}", flush=True)
+        except Exception as e:
+            print(f"WandB attach failed (logging to JSONL only): {e}", flush=True)
+
+    jsonl_path = train_output / "val_loss.jsonl"
+    checkpoints_dir = train_output / "checkpoints"
+    seen: set[str] = set()
+
+    # Resume from prior JSONL entries — restarting the sidecar doesn't re-eval.
+    if jsonl_path.exists():
+        for line in open(jsonl_path):
+            try:
+                seen.add(str(json.loads(line)["step"]))
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if seen:
+            print(f"Resumed: {len(seen)} checkpoints already in JSONL", flush=True)
+
+    print(f"Output:        {jsonl_path}", flush=True)
+    print("Watching for new checkpoints (Ctrl-C to stop)...", flush=True)
+
+    try:
+        while True:
+            if checkpoints_dir.exists():
+                for ckpt in sorted(checkpoints_dir.iterdir()):
+                    if not ckpt.is_dir():
+                        continue
+                    step = step_from_ckpt_name(ckpt.name)
+                    if step is None or str(step) in seen:
+                        continue
+                    model_dir = ckpt / "pretrained_model"
+                    if not model_dir.exists():
+                        continue  # checkpoint still being written by trainer
+
+                    print(f"[step {step}] loading checkpoint...", flush=True)
+                    try:
+                        policy = ACTPolicy.from_pretrained(str(model_dir)).to(device)
+                        t0 = time.time()
+                        val_loss = compute_val_loss(policy, val_loader, device)
+                        dt = time.time() - t0
+                        del policy
+                        if device == "cuda":
+                            torch.cuda.empty_cache()
+
+                        record = {
+                            "step": step,
+                            "val_loss": val_loss,
+                            "n_val_episodes": len(val_episodes),
+                            "n_val_frames": len(val_ds),
+                            "elapsed_s": round(dt, 2),
+                        }
+                        with open(jsonl_path, "a") as f:
+                            f.write(json.dumps(record) + "\n")
+
+                        if wandb_run is not None:
+                            wandb_run.log({"val/loss": val_loss}, step=step)
+
+                        print(f"[step {step}] val_loss={val_loss:.5f}  ({dt:.1f}s)",
+                              flush=True)
+                        seen.add(str(step))
+                    except Exception as e:
+                        print(f"[step {step}] ERROR: {e}", flush=True)
+                        traceback.print_exc()
+                        # Mark as failed so we don't retry forever.
+                        seen.add(str(step))
+            time.sleep(args.poll_interval)
+    except KeyboardInterrupt:
+        print("\nSidecar stopped by user.", flush=True)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+
+
+if __name__ == "__main__":
+    main()
