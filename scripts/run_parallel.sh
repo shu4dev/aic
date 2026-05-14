@@ -139,6 +139,11 @@ if [ -n "$PART_FILE" ] && [ -z "$PART_INDEX" ]; then
     PART_INDEX="${_part_base##*_}"
 fi
 
+# Default PART_INDEX to 0 if still unset. setup_workers.sh always names workers
+# aic_worker_0 .. aic_worker_{N-1} (even for N=1), so the single-worker default
+# must target aic_worker_0, not bare "aic_worker".
+PART_INDEX="${PART_INDEX:-0}"
+
 # Auto-derive ROUTER_PORT from PART_INDEX so concurrent workers on the same host
 # get distinct Zenoh listen ports: worker 0 → 7447, worker 1 → 7448, …
 # Must match the port baked into the worker's bind-mounted /entrypoint.sh by
