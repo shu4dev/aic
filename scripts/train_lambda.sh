@@ -11,7 +11,7 @@
 #
 # Environment overrides (all optional):
 #   DATASET_DIR    LeRobot dataset path     (default: ~/aic_lerobot_dataset)
-#   OUTPUT_ROOT    Where checkpoints land   (default: ~/outputs/train)
+#   OUTPUT_ROOT    Where checkpoints land   (default: /home/ubuntu/aic-data/outputs/train — mounted FS)
 #   TRAIN_STEPS    Training steps           (default: 100000)
 #   BATCH_SIZE     Per-step batch           (default: 64 — A100 40 GB safe)
 #   SAVE_FREQ      Checkpoint frequency     (default: 5000)
@@ -36,7 +36,7 @@ set -e
 # ── Paths ────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATASET_DIR="${DATASET_DIR:-${HOME}/aic/aic_lerobot_dataset}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${HOME}/outputs/train}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/ubuntu/aic-data/outputs/train}"
 
 # Auto-detect pixi vs system python (Lambda Stack has its own torch).
 if [[ -x "${REPO_ROOT}/.pixi/envs/default/bin/lerobot-train" ]]; then
