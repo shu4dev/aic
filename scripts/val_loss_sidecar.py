@@ -108,7 +108,14 @@ def load_val_episodes(dataset_root: Path) -> tuple[list[int], int]:
 
 
 def extract_loss(output) -> float:
-    """Pull the scalar loss from whatever the policy returned."""
+    """Pull the scalar loss from whatever the policy returned.
+
+    lerobot 0.5.x ACTPolicy returns (total_loss_tensor, {breakdown_dict});
+    older versions returned a dict or a bare tensor. Handle all three.
+    """
+    if isinstance(output, tuple) and output:
+        # First element is the total loss; remaining elements are a breakdown.
+        return extract_loss(output[0])
     if isinstance(output, dict):
         if "loss" in output:
             return float(output["loss"].item() if torch.is_tensor(output["loss"])
@@ -123,7 +130,15 @@ def extract_loss(output) -> float:
     raise TypeError(f"Cannot extract loss from {type(output).__name__}: {output}")
 
 
-def compute_val_loss(policy, val_loader, device) -> float:
+def extract_loss_breakdown(output) -> dict[str, float]:
+    """Return any auxiliary scalar losses (l1_loss, kld_loss, ...) from the
+    policy output, in addition to the total returned by extract_loss."""
+    if isinstance(output, tuple) and len(output) > 1 and isinstance(output[1], dict):
+        return {k: float(v.item() if torch.is_tensor(v) else v) for k, v in output[1].items()}
+    return {}
+
+
+def compute_val_loss(policy, val_loader, device) -> tuple[float, dict[str, float]]:
     # NOTE: train() mode, not eval(). ACT's CVAE encoder is gated on
     # self.training — in eval() the encoder is skipped and (mu, log_sigma)
     # come back as None, but ACTPolicy.forward still computes the KL term
@@ -132,6 +147,8 @@ def compute_val_loss(policy, val_loader, device) -> float:
     # the loss is still a valid trend signal across checkpoints.
     policy.train()
     losses: list[float] = []
+    breakdown_sums: dict[str, float] = {}
+    n_batches = 0
     with torch.no_grad():
         for batch in val_loader:
             batch = {
@@ -141,13 +158,18 @@ def compute_val_loss(policy, val_loader, device) -> float:
             try:
                 output = policy(batch)
                 losses.append(extract_loss(output))
+                for k, v in extract_loss_breakdown(output).items():
+                    breakdown_sums[k] = breakdown_sums.get(k, 0.0) + v
+                n_batches += 1
             except torch.cuda.OutOfMemoryError:
                 # Free what we can and keep going. The sidecar competes for VRAM
                 # with training; an occasional skipped batch is acceptable.
                 torch.cuda.empty_cache()
                 print("  WARN: CUDA OOM on val batch — skipped", flush=True)
                 continue
-    return sum(losses) / len(losses) if losses else float("nan")
+    mean_loss = sum(losses) / len(losses) if losses else float("nan")
+    mean_breakdown = {k: v / n_batches for k, v in breakdown_sums.items()} if n_batches else {}
+    return mean_loss, mean_breakdown
 
 
 def step_from_ckpt_name(name: str):
@@ -284,7 +306,7 @@ def main():
                     try:
                         policy = ACTPolicy.from_pretrained(str(model_dir)).to(device)
                         t0 = time.time()
-                        val_loss = compute_val_loss(policy, val_loader, device)
+                        val_loss, breakdown = compute_val_loss(policy, val_loader, device)
                         dt = time.time() - t0
                         del policy
                         if device == "cuda":
@@ -296,14 +318,19 @@ def main():
                             "n_val_episodes": len(val_episodes),
                             "n_val_frames": len(val_ds),
                             "elapsed_s": round(dt, 2),
+                            **{f"val_{k}": v for k, v in breakdown.items()},
                         }
                         with open(jsonl_path, "a") as f:
                             f.write(json.dumps(record) + "\n")
 
                         if wandb_run is not None:
-                            wandb_run.log({"val/loss": val_loss}, step=step)
+                            log_payload = {"val/loss": val_loss}
+                            log_payload.update({f"val/{k}": v for k, v in breakdown.items()})
+                            wandb_run.log(log_payload, step=step)
 
-                        print(f"[step {step}] val_loss={val_loss:.5f}  ({dt:.1f}s)",
+                        breakdown_str = (" ".join(f"{k}={v:.5f}" for k, v in breakdown.items())
+                                         if breakdown else "")
+                        print(f"[step {step}] val_loss={val_loss:.5f}  {breakdown_str}  ({dt:.1f}s)",
                               flush=True)
                         seen.add(str(step))
                     except Exception as e:
