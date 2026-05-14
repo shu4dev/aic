@@ -66,20 +66,35 @@ def find_train_config(train_output: Path) -> Path | None:
     return None
 
 
-def find_dataset_root(train_output: Path) -> Path:
-    """Discover the dataset root from the training config that lerobot-train writes."""
+def load_train_config(train_output: Path) -> dict:
     cfg_path = find_train_config(train_output)
     if cfg_path is None:
         raise FileNotFoundError(
             f"No train_config.json under {train_output} (checked root and "
             f"checkpoints/*/pretrained_model/)"
         )
-    cfg = json.load(open(cfg_path))
+    return json.load(open(cfg_path))
+
+
+def find_dataset_root(cfg: dict) -> Path:
     ds_cfg = cfg.get("dataset", {})
     root = ds_cfg.get("root") or ds_cfg.get("dataset_root")
     if not root:
-        raise KeyError(f"No dataset.root in {cfg_path}")
+        raise KeyError("No dataset.root in train_config.json")
     return Path(root)
+
+
+def build_delta_timestamps(cfg: dict, dataset_root: Path) -> dict[str, list[float]]:
+    """Replicate lerobot-train's dataset delta_timestamps so the val loader
+    yields the same chunked tensors training sees. Without this, batch[ACTION]
+    is shape [B, action_dim] and the ACT chunk loss errors out at broadcast."""
+    info = json.load(open(dataset_root / "meta" / "info.json"))
+    fps = info["fps"]
+    policy_cfg = cfg.get("policy", {})
+    chunk_size = int(policy_cfg.get("chunk_size", 100))
+    # ACT consumes only the current observation; targets are the next
+    # `chunk_size` actions starting at t.
+    return {"action": [i / fps for i in range(chunk_size)]}
 
 
 def load_val_episodes(dataset_root: Path) -> tuple[list[int], int]:
@@ -187,10 +202,14 @@ def main():
         sys.exit(1)
     print(f"Found config:  {cfg_path}", flush=True)
 
-    dataset_root = find_dataset_root(train_output)
+    cfg = load_train_config(train_output)
+    dataset_root = find_dataset_root(cfg)
     val_episodes, n_total = load_val_episodes(dataset_root)
+    delta_timestamps = build_delta_timestamps(cfg, dataset_root)
     print(f"Dataset:       {dataset_root}", flush=True)
     print(f"Val episodes:  {len(val_episodes)} of {n_total}", flush=True)
+    print(f"Action chunk:  {len(delta_timestamps['action'])} steps "
+          f"(delta_timestamps for 'action')", flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device:        {device}", flush=True)
@@ -200,6 +219,7 @@ def main():
         repo_id=dataset_root.name,
         root=str(dataset_root),
         episodes=val_episodes,
+        delta_timestamps=delta_timestamps,
     )
     val_loader = DataLoader(
         val_ds,
