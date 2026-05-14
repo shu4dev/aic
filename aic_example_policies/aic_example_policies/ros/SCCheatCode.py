@@ -135,6 +135,22 @@ CONNECTOR_PARAMS = {
         # with integrator reset every iter — preserving the existing
         # low-jerk swing-minimized trajectory shape.
         "approach_converge_frac": 0.4,
+        # Drop in wrench magnitude below baseline (N) that counts as
+        # sustained lip-support contact. Signed-delta `force_trigger_abs=
+        # False` clamps df_med to max(0, force-baseline), so when the
+        # cable rests on the port lip (lip supports cable weight → wrench
+        # drops ~12-14 N below baseline) backoff never fires and descent
+        # walks z to max_depth with the plug frozen at zgap=13.47 mm.
+        # 8 N is well above transient dip noise (~3-4 N) but below the
+        # observed sustained lip-support drop, so normal seating doesn't
+        # false-trigger.
+        "force_drop": 8.0,
+        # Tighten the off-center gate for SC. The default 2 mm is SFP-
+        # tuned (wide cage); SC's alignment sleeve clearance is sub-mm,
+        # so 1.5-2 mm cable_to_port still means "on the lip", not "in
+        # the hole". Without this, the off-center gate blocks backoff
+        # when bias happens to align closely (e.g., xy_to_port=1.79 mm).
+        "backoff_distance_gate_m": 0.0008,
     },
 }
 DEFAULT_PARAMS = CONNECTOR_PARAMS["sfp"]
@@ -1140,6 +1156,17 @@ class SCCheatCode(Policy):
         F_ref = params["force_ref"]
         F_soft = params["force_soft"]
         F_limit = params["force_limit"]
+        # Sustained drop below baseline (N) that counts as lip-support
+        # contact. SC opts in (8 N); SFP omits ⇒ 0.0 = trigger off. See
+        # the `force_drop` comment in CONNECTOR_PARAMS["sc"] for why
+        # signed-delta needs this companion trigger.
+        F_drop = params.get("force_drop", 0.0)
+        # Per-task off-center gate for backoff. SC tightens this to
+        # 0.8 mm so 1.5-2 mm cable_to_port still counts as off-center
+        # (sub-mm sleeve clearance). SFP keeps the default 2 mm.
+        BACKOFF_DISTANCE_GATE_M = params.get(
+            "backoff_distance_gate_m", 0.002
+        )
         wsm = self._wrench_smoother
         win = self._wrench_window_s
 
@@ -1295,17 +1322,26 @@ class SCCheatCode(Policy):
                     )
                     backoff_xy_hold = None
             backed_off = False
-            # 2 mm gate: if cable is right at the port, force feedback is
-            # almost certainly port-rim rubbing during good insertion —
-            # don't retreat with the lift+retarget backoff. But we still
-            # want the *XY probe* to fire there: when cable is centered
-            # but force is high (e.g., bottom snagged on lip edge,
+            # Off-center gate (BACKOFF_DISTANCE_GATE_M, per-task): if
+            # cable is right at the port, force feedback is almost
+            # certainly port-rim rubbing during good insertion — don't
+            # retreat with the lift+retarget backoff. But we still want
+            # the *XY probe* to fire there: when cable is centered but
+            # force is high (e.g., bottom snagged on lip edge,
             # rotational misalignment), a small XY scan with z held may
             # engage the slot without disturbing the descent target.
-            BACKOFF_DISTANCE_GATE_M = 0.002
+            #
+            # Force-drop trigger: SC's signed-delta `force_trigger_abs=
+            # False` clamps `df_med = max(0, force_med - baseline)` to
+            # 0 when the port lip supports cable weight (sustained drop
+            # below baseline). The `force_drop_med` companion catches
+            # that case so backoff fires on lip contact. SFP keeps
+            # F_drop=0.0 so this OR-branch never contributes.
+            force_drop_med = max(0.0, baseline - force_med)
             force_high = (
                 cooldown_remaining == 0
-                and df_med >= F_soft
+                and (df_med >= F_soft
+                     or (F_drop > 0.0 and force_drop_med >= F_drop))
             )
             high_force_offcenter = (
                 force_high
