@@ -130,6 +130,9 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--poll-interval", type=float, default=10.0,
                    help="Seconds between checkpoint-directory scans")
+    p.add_argument("--config-timeout", type=float, default=3600.0,
+                   help="Seconds to wait for train_config.json before giving up "
+                        "(dataset init can take 10-20 min with PyAV on large datasets)")
     p.add_argument("--wandb-run-id", default=None,
                    help="Attach to this wandb run (same one as training)")
     p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "aic-act"))
@@ -139,13 +142,22 @@ def main():
     train_output = args.train_output.resolve()
     print(f"Sidecar watching: {train_output}", flush=True)
 
-    # lerobot-train writes train_config.json once it starts. Wait up to 10 min.
+    # lerobot-train writes train_config.json after dataset init, which on PyAV +
+    # a large LeRobot dataset can take 10-20 min. Default wait: 1 h, override via flag.
     cfg_path = train_output / "train_config.json"
-    deadline = time.time() + 600
+    deadline = time.time() + args.config_timeout
+    waited = 0
     while not cfg_path.exists() and time.time() < deadline:
         time.sleep(5)
+        waited += 5
+        if waited % 60 == 0:
+            print(f"  still waiting for {cfg_path.name} ({waited // 60} min elapsed, "
+                  f"{int(args.config_timeout) // 60} min timeout)", flush=True)
     if not cfg_path.exists():
-        sys.stderr.write(f"Timeout: no {cfg_path} after 10 min — is training running?\n")
+        sys.stderr.write(
+            f"Timeout: no {cfg_path} after {int(args.config_timeout) // 60} min — "
+            f"is training running? Bump --config-timeout if dataset init is slow.\n"
+        )
         sys.exit(1)
 
     dataset_root = find_dataset_root(train_output)
