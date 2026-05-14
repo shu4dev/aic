@@ -14,7 +14,9 @@ wall_duration comes from MCAP log_time span. Camera sim-rate should be 20 Hz
 on every bag — anything else means the publisher itself is misconfigured.
 """
 
-import sys
+import argparse
+import os
+from multiprocessing import Pool
 from pathlib import Path
 
 from mcap.reader import make_reader
@@ -52,39 +54,49 @@ def find_mcaps(roots: list[str]) -> list[Path]:
     return found
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def analyze(mcap_path: Path) -> str:
+    wall = wall_duration_s(mcap_path)
+    js = header_stamps(mcap_path, JS_TOPIC)
+    cam = header_stamps(mcap_path, CAM_TOPIC)
 
-    mcaps = find_mcaps(sys.argv[1:])
+    if len(js) < 2 or wall <= 0:
+        return f"{mcap_path.name:<60} insufficient data"
+
+    sim = js[-1] - js[0]
+    rtf = sim / wall
+    js_hz = (len(js) - 1) / sim
+    cam_hz = (len(cam) - 1) / (cam[-1] - cam[0]) if len(cam) >= 2 else float("nan")
+
+    js_flag = "" if abs(js_hz - EXPECTED_JS_SIM_HZ) < 5 else "  !js"
+    cam_flag = "" if abs(cam_hz - EXPECTED_CAM_SIM_HZ) < 0.5 else "  !cam"
+
+    return (f"{mcap_path.name:<60} {wall:8.2f} {sim:8.2f} {rtf:6.2f} "
+            f"{js_hz:8.1f} {cam_hz:8.2f}{js_flag}{cam_flag}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("paths", nargs="+", help="bag dirs or .mcap files")
+    p.add_argument("-j", "--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+                   help="parallel workers (default: cpu_count/2)")
+    args = p.parse_args()
+
+    mcaps = find_mcaps(args.paths)
     if not mcaps:
         print("No .mcap files found.")
-        sys.exit(1)
+        return
 
     print(f"{'bag':<60} {'wall_s':>8} {'sim_s':>8} {'RTF':>6} "
           f"{'js_Hz':>8} {'cam_Hz':>8}")
     print("-" * 102)
 
-    for mcap_path in mcaps:
-        wall = wall_duration_s(mcap_path)
-        js = header_stamps(mcap_path, JS_TOPIC)
-        cam = header_stamps(mcap_path, CAM_TOPIC)
-
-        if len(js) < 2 or wall <= 0:
-            print(f"{mcap_path.name:<60} insufficient data")
-            continue
-
-        sim = js[-1] - js[0]
-        rtf = sim / wall
-        js_hz = (len(js) - 1) / sim
-        cam_hz = (len(cam) - 1) / (cam[-1] - cam[0]) if len(cam) >= 2 else float("nan")
-
-        js_flag = "" if abs(js_hz - EXPECTED_JS_SIM_HZ) < 5 else "  !js"
-        cam_flag = "" if abs(cam_hz - EXPECTED_CAM_SIM_HZ) < 0.5 else "  !cam"
-
-        print(f"{mcap_path.name:<60} {wall:8.2f} {sim:8.2f} {rtf:6.2f} "
-              f"{js_hz:8.1f} {cam_hz:8.2f}{js_flag}{cam_flag}")
+    if args.workers == 1 or len(mcaps) == 1:
+        for mp in mcaps:
+            print(analyze(mp))
+    else:
+        with Pool(args.workers) as pool:
+            for line in pool.imap_unordered(analyze, mcaps):
+                print(line, flush=True)
 
 
 if __name__ == "__main__":

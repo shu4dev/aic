@@ -18,8 +18,10 @@ Usage:
     python3 check_dedup.py <bag_dir_or_results_root> [...]
 """
 
-import sys
+import argparse
+import os
 from collections import Counter
+from multiprocessing import Pool
 from pathlib import Path
 
 from mcap_ros2.reader import read_ros2_messages
@@ -61,28 +63,39 @@ def stamp_stats(mcap_path: Path, topic: str):
     }
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def analyze(mcap_path: Path) -> str:
+    lines = [f"\n{mcap_path.name}"]
+    for topic in TOPICS:
+        s = stamp_stats(mcap_path, topic)
+        if s is None:
+            lines.append(f"  {topic:<40} (no messages)")
+            continue
+        ratio = s["total"] / s["unique"] if s["unique"] else 0
+        verdict = "OK" if ratio < 1.05 or s["max_mult"] == int(round(ratio)) else "JITTER"
+        lines.append(f"  {topic:<40} total={s['total']:>7} unique={s['unique']:>7} "
+                     f"ratio={ratio:>5.2f}× max_mult={s['max_mult']:>3}  [{verdict}]")
+        lines.append(f"    multiplicity histogram: {s['mult_hist']}")
+    return "\n".join(lines)
 
-    mcaps = find_mcaps(sys.argv[1:])
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("paths", nargs="+")
+    p.add_argument("-j", "--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    args = p.parse_args()
+
+    mcaps = find_mcaps(args.paths)
     if not mcaps:
         print("No .mcap files found.")
-        sys.exit(1)
+        return
 
-    for mcap_path in mcaps:
-        print(f"\n{mcap_path.name}")
-        for topic in TOPICS:
-            s = stamp_stats(mcap_path, topic)
-            if s is None:
-                print(f"  {topic:<40} (no messages)")
-                continue
-            ratio = s["total"] / s["unique"] if s["unique"] else 0
-            verdict = "OK" if ratio < 1.05 or s["max_mult"] == int(round(ratio)) else "JITTER"
-            print(f"  {topic:<40} total={s['total']:>7} unique={s['unique']:>7} "
-                  f"ratio={ratio:>5.2f}× max_mult={s['max_mult']:>3}  [{verdict}]")
-            print(f"    multiplicity histogram: {s['mult_hist']}")
+    if args.workers == 1 or len(mcaps) == 1:
+        for mp in mcaps:
+            print(analyze(mp))
+    else:
+        with Pool(args.workers) as pool:
+            for block in pool.imap_unordered(analyze, mcaps):
+                print(block, flush=True)
 
 
 if __name__ == "__main__":
