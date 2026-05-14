@@ -101,13 +101,17 @@ done
 cat <<MSG
 
 Next steps:
-  - Verify NVIDIA EGL works inside one of them:
-      sudo docker exec ${NAME_PREFIX}_0 eglinfo 2>&1 | grep -iE 'vendor|renderer|nvidia' | head -5
-    Expected: a line containing "OpenGL renderer string: NVIDIA …"
-    If not, the host is probably missing libnvidia-gl-580-server (or matching
-    suffix for your driver). See docs/lambda_headless_setup.md Step 1.
+  - Verify NVIDIA EGL works inside one of them. The env var matters: libglvnd
+    needs __EGL_VENDOR_LIBRARY_FILENAMES set to actually pick NVIDIA's ICD,
+    otherwise eglinfo silently falls back to llvmpipe even though the libs and
+    /dev/nvidia* are all present:
+      sudo docker exec \\
+          -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \\
+          ${NAME_PREFIX}_0 eglinfo 2>&1 | grep -iE 'vendor|renderer|nvidia' | head -5
+    Expected output starts with "EGL vendor string: NVIDIA" and includes a line
+    like "OpenGL core profile renderer: NVIDIA …".
 
-  - Run an eval worker:
+  - Run an eval worker (run_parallel.sh sets the EGL env automatically):
       bash scripts/run_parallel.sh                      # uses ${NAME_PREFIX}_0
   - Tear down (if you ever want to recreate):
       sudo docker rm -f ${NAME_PREFIX}_0
