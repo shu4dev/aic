@@ -43,14 +43,14 @@
 #   RESULTS_BASE     parent dir for per-worker aic_results_<i>/
 #                                               (default: /home/ubuntu/aic-data)
 #   MERGED_OUTPUT    final merged scores YAML   (default: $RESULTS_BASE/merged_score.yaml)
-#   STAGGER_SECS     seconds to wait between worker launches. Must be wide
-#                    enough that the previous worker's Gazebo is past its
-#                    Ogre2/EGL init by the time the next one starts — two
-#                    concurrent NVIDIA EGL inits on one A100 segfault the
-#                    component_container with "unable to find OpenGL 3+
-#                    Rendering Subsystem". Empirically ~30s clears Gazebo's
-#                    render-engine load; bump higher if Ogre2 still crashes.
-#                    Default: 30.
+#   STAGGER_SECS     seconds to wait between worker launches so CPU/disk init
+#                    storms don't overlap. Default: 5.
+#                    NOTE: real concurrent multi-worker execution on one host
+#                    still needs Phase 2 work — distrobox containers default to
+#                    --network host, so two of them both binding Zenoh on 7447
+#                    will collide. Until each worker container is set up with
+#                    its own Zenoh router port (separate plan), NUM_WORKERS>1
+#                    will not actually run in parallel.
 #   HOST_CPUS        cores available to split   (default: 30)
 #   HOST_MEM_GB      GB of RAM available to split (default: 192)
 #   WORKER_CPUS      per-worker --cpus override (default: ⌊HOST_CPUS/N⌋)
@@ -68,7 +68,7 @@ INPUT_CONFIG="${INPUT_CONFIG:-$REPO_ROOT/aic_engine/config/train.yaml}"
 SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs}"
 RESULTS_BASE="${RESULTS_BASE:-/home/ubuntu/aic-data}"
 MERGED_OUTPUT="${MERGED_OUTPUT:-$RESULTS_BASE/merged_score.yaml}"
-STAGGER_SECS="${STAGGER_SECS:-30}"
+STAGGER_SECS="${STAGGER_SECS:-5}"
 HOST_CPUS="${HOST_CPUS:-30}"
 HOST_MEM_GB="${HOST_MEM_GB:-192}"
 
@@ -126,15 +126,17 @@ NAMES=()
 cleanup() {
     echo ""
     echo "[orchestrator] Cleaning up..."
-    # Signal each backgrounded run_parallel.sh — its own EXIT trap force-rms
-    # the container and kills the host-side policy/relay.
+    # Signal each backgrounded run_parallel.sh — its own EXIT trap kills the
+    # in-container launch and the host-side policy/relay. Distrobox containers
+    # themselves are long-lived (created by scripts/setup_workers.sh) and must
+    # NOT be removed here.
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
-    # Belt-and-suspenders: directly force-rm containers in case a child died
-    # before its trap could fire.
+    # Belt-and-suspenders: directly kill any lingering /entrypoint.sh inside
+    # each worker container, in case a child shell died before its trap fired.
     for name in "${NAMES[@]}"; do
-        sudo docker rm -f "$name" >/dev/null 2>&1 || true
+        sudo docker exec "$name" pkill -TERM -f /entrypoint.sh >/dev/null 2>&1 || true
     done
 }
 trap cleanup EXIT INT TERM

@@ -210,19 +210,19 @@ if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${ROUTER_PORT}\$"; the
     exit 1
 fi
 
-# Verify the image is locally present or pullable. Catches "not logged in to
-# ghcr.io" up front with a clear message instead of letting `docker run` fail
-# halfway through with "pull access denied".
-if ! ${DOCKER} image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "Pulling $IMAGE ..."
-    if ! ${DOCKER} pull "$IMAGE"; then
-        echo "" >&2
-        echo "error: cannot pull $IMAGE." >&2
-        echo "       If this is a private GHCR repo, log in first:" >&2
-        echo "       echo \"\$GHCR_TOKEN\" | ${DOCKER} login ghcr.io -u shu4dev --password-stdin" >&2
-        echo "       (see Step 4 of docs/lambda_headless_setup.md)" >&2
-        exit 1
+# The container must already exist as a distrobox-managed container — that is
+# how the host's libnvidia-gl-*-server gets bind-mounted in (Ogre2 needs it).
+# Plain `docker run --gpus all` does not replicate distrobox's NVIDIA library
+# mounts, so gz_server segfaults at Ogre2 init with "unable to find OpenGL 3+
+# Rendering Subsystem". See docs/lambda_headless_setup.md.
+if ! ${DOCKER} container inspect "$NAME" >/dev/null 2>&1; then
+    echo "error: container '$NAME' does not exist." >&2
+    echo "       Create it once via:  bash scripts/setup_workers.sh" >&2
+    if [ -n "$PART_INDEX" ]; then
+        echo "       (You're using PART_INDEX=$PART_INDEX, so make sure setup_workers.sh" >&2
+        echo "        was run with NUM_WORKERS=$((PART_INDEX + 1)) or higher.)" >&2
     fi
+    exit 1
 fi
 
 mkdir -p "$RESULTS"
@@ -235,73 +235,58 @@ if [ -n "$PART_FILE" ]; then
     echo "Part file:    $PART_FILE (PART_INDEX=$PART_INDEX)"
 fi
 echo "Results:      $RESULTS"
-if [ "$ROUTER_PORT" = "7447" ]; then
-    echo "Container:    $NAME (--network host, Zenoh @ 127.0.0.1:7447, --cpus=$WORKER_CPUS --memory=$WORKER_MEM)"
-else
-    echo "Container:    $NAME (bridge -p 127.0.0.1:${ROUTER_PORT}:7447, --cpus=$WORKER_CPUS --memory=$WORKER_MEM)"
-fi
+echo "Container:    $NAME (distrobox, Zenoh @ 127.0.0.1:${ROUTER_PORT})"
 echo "Relay:        $RELAY_NODE (host, ROS @ $ROS_SETUP)"
 echo ""
 
-# --- Stage 1: launch eval container (mirrors T1) --------------------------
+# --- Stage 1: launch eval inside the distrobox container (mirrors T1) ----
+#
+# Container model: scripts/setup_workers.sh creates a long-lived distrobox
+# container named "$NAME" with --nvidia (bind-mounts host NVIDIA GL/EGL libs
+# so Ogre2 can resolve RenderSystem_GL3Plus) and a bind-mount of
+# /home/ubuntu/aic-data → /home/ubuntu/aic-data at the same path inside the
+# container. We just start it and `docker exec` the launch — the GL libs are
+# already in place, no per-run `docker run` needed.
 
-${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
-
-image_scale_args=()
+# Extra env to pass through to the in-container launch process. AIC_RESULTS_DIR
+# uses the same host path because the bind-mount is identity-pathed.
+exec_env_args=(
+    -e "AIC_RESULTS_DIR=$RESULTS"
+    -e "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+)
 if [ -n "${AIC_IMAGE_SCALE:-}" ]; then
-    image_scale_args=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
+    exec_env_args+=(-e "AIC_IMAGE_SCALE=$AIC_IMAGE_SCALE")
 fi
 
-part_mount_args=()
+# Part-file is on the mounted FS, which is bind-mounted at the same path inside
+# the container — pass its host path directly as the launch arg.
 part_launch_args=()
 if [ -n "$PART_FILE" ]; then
-    part_mount_args=(-v "$PART_FILE:/root/aic_part.yaml:ro")
-    part_launch_args=(aic_engine_config_file:=/root/aic_part.yaml)
+    part_launch_args=("aic_engine_config_file:=$PART_FILE")
 fi
 
-# Worker 0 keeps --network host so single-worker invocations behave exactly as
-# before. Workers ≥1 use bridge networking with --publish to expose the
-# container's internal Zenoh router (still hardcoded to 7447 inside) on a
-# distinct host port, so multiple workers can coexist on one Lambda box.
-network_args=()
-if [ "$ROUTER_PORT" = "7447" ]; then
-    network_args=(--network host)
-else
-    network_args=(--publish "127.0.0.1:${ROUTER_PORT}:7447")
-fi
+# Make sure the container is up. `docker start` is a no-op if it's already
+# running, otherwise it boots distrobox's init and returns when ready.
+${DOCKER} start "$NAME" >/dev/null
+echo "[$NAME] container started"
 
-${DOCKER} run -d --rm \
-    --name "$NAME" \
-    "${network_args[@]}" \
-    --gpus all \
-    --cpus "$WORKER_CPUS" \
-    --memory "$WORKER_MEM" \
-    --env NVIDIA_DRIVER_CAPABILITIES=all \
-    --env NVIDIA_VISIBLE_DEVICES=all \
-    --env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
-    --user root \
-    --ipc=host \
-    -v "$RESULTS:/root/aic_results" \
-    -e AIC_RESULTS_DIR=/root/aic_results \
-    "${image_scale_args[@]}" \
-    "${part_mount_args[@]}" \
-    "$IMAGE" \
+# Run the actual launch via `docker exec` in the background, streaming the
+# launch's stdout/stderr straight into engine.log. We `wait` on this PID in
+# Stage 4 instead of `docker wait`-ing the whole container — the container
+# itself persists across runs so it can be re-used by the next invocation.
+ENGINE_LOG="$RESULTS/engine.log"
+${DOCKER} exec -u root \
+    "${exec_env_args[@]}" \
+    "$NAME" \
+    /entrypoint.sh \
     "${part_launch_args[@]}" \
     ground_truth:="$GROUND_TRUTH" \
     gazebo_gui:=false launch_rviz:=false \
     start_aic_engine:=true \
     shutdown_on_aic_engine_exit:=true \
-    >/dev/null
-
-echo "[$NAME] started"
-
-# Stream the container's stdout/stderr to engine.log live, so the file is
-# tailable while the container is still running (essential for debugging
-# hangs — `docker wait` blocks indefinitely if aic_engine never self-exits).
-# `docker logs -f` returns its own exit when the container is removed.
-ENGINE_LOG="$RESULTS/engine.log"
-${DOCKER} logs -f "$NAME" > "$ENGINE_LOG" 2>&1 &
-ENGINE_LOG_PID=$!
+    > "$ENGINE_LOG" 2>&1 &
+LAUNCH_PID=$!
+echo "[$NAME] launch exec started (PID $LAUNCH_PID, log $ENGINE_LOG)"
 
 # --- Cleanup trap ---------------------------------------------------------
 
@@ -311,8 +296,12 @@ POLICY_PID=""
 cleanup() {
     if [ -n "$POLICY_PID" ]; then kill "$POLICY_PID" 2>/dev/null || true; fi
     if [ -n "$RELAY_PID" ];  then kill "$RELAY_PID"  2>/dev/null || true; fi
-    if [ -n "${ENGINE_LOG_PID:-}" ]; then kill "$ENGINE_LOG_PID" 2>/dev/null || true; fi
-    ${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
+    if [ -n "${LAUNCH_PID:-}" ]; then kill "$LAUNCH_PID" 2>/dev/null || true; fi
+    # Kill the in-container launch tree too — `kill $LAUNCH_PID` only closes our
+    # docker-exec stream and doesn't always cascade to the process inside.
+    # Don't `docker rm -f $NAME` — the container persists across runs.
+    ${DOCKER} exec "$NAME" pkill -TERM -f /entrypoint.sh >/dev/null 2>&1 || true
+    ${DOCKER} exec "$NAME" pkill -TERM -f ros2          >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -390,19 +379,17 @@ POLICY_LOG="$RESULTS/policy.log"
 POLICY_PID=$!
 echo "[$NAME] policy launched: $POLICY (PID $POLICY_PID, log $POLICY_LOG)"
 
-# --- Stage 4: wait for the eval container to self-terminate ---------------
+# --- Stage 4: wait for the in-container launch to self-terminate ----------
+#
+# The container persists across runs; we wait on the docker-exec PID instead.
+# shutdown_on_aic_engine_exit:=true makes /entrypoint.sh return once aic_engine
+# is done, so this wait reliably terminates.
 
 echo ""
-echo "Waiting for $NAME to finish..."
+echo "Waiting for $NAME launch to finish..."
 echo "  (Tail aic_engine's view live: tail -f $ENGINE_LOG)"
-${DOCKER} wait "$NAME" >/dev/null
-echo "[$NAME] done"
-
-# The background `docker logs -f` started right after `docker run` has already
-# streamed everything to $ENGINE_LOG; wait for it to drain once the container
-# is gone so we don't miss the tail end. The cleanup trap will kill it if it
-# somehow hasn't exited on its own.
-wait "$ENGINE_LOG_PID" 2>/dev/null || true
+wait "$LAUNCH_PID" || true
+echo "[$NAME] launch done"
 
 # --- Summary --------------------------------------------------------------
 
