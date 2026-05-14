@@ -35,7 +35,7 @@ set -e
 
 # ── Paths ────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATASET_DIR="${DATASET_DIR:-${HOME}/aic_lerobot_dataset}"
+DATASET_DIR="${DATASET_DIR:-${HOME}/aic/aic_lerobot_dataset}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${HOME}/outputs/train}"
 
 # Auto-detect pixi vs system python (Lambda Stack has its own torch).
