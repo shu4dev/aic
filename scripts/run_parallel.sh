@@ -332,6 +332,11 @@ fi
 
 RELAY_LOG="$RESULTS/image_relay.log"
 (
+    # /opt/ros/kilted/setup.bash references $AMENT_TRACE_SETUP_FILES and other
+    # vars without ${VAR:-} defaults, which trips the parent script's `set -u`.
+    # The venv activate script is also third-party. Opt out of nounset for this
+    # subshell only; errexit + pipefail still catch real failures.
+    set +u
     # shellcheck disable=SC1090
     source "$ROS_SETUP"
     # Activate the ws_aic venv AFTER ROS setup so $RELAY_VENV/bin/python3 wins
@@ -350,6 +355,10 @@ echo "[$NAME] image_relay launched (PID $RELAY_PID, log $RELAY_LOG)"
 
 POLICY_LOG="$RESULTS/policy.log"
 (
+    # Defensive: pixi run sources its own activate script internally; opt out of
+    # nounset for symmetry with the relay subshell, in case pixi's setup ever
+    # grows an unguarded variable reference.
+    set +u
     cd "$REPO_ROOT"
     # pixi_env_setup.sh uses `${ZENOH_CONFIG_OVERRIDE:-default}`, so exporting
     # here before `pixi run` makes our worker-specific endpoint stick.
@@ -368,6 +377,12 @@ echo "Waiting for $NAME to finish..."
 ${DOCKER} wait "$NAME" >/dev/null
 echo "[$NAME] done"
 
+# Capture the eval engine's stdout/stderr before the container is reaped.
+# `docker logs` still works against a finished --rm container while we hold a
+# handle, and this is the only place to grab aic_engine's view for postmortem.
+ENGINE_LOG="$RESULTS/engine.log"
+${DOCKER} logs "$NAME" > "$ENGINE_LOG" 2>&1 || true
+
 # --- Summary --------------------------------------------------------------
 
 echo ""
@@ -375,5 +390,5 @@ echo "=== Run finished ==="
 if [ -f "$RESULTS/score.yaml" ]; then
     ls -lh "$RESULTS/score.yaml"
 else
-    echo "(no score.yaml in $RESULTS — check $POLICY_LOG, $RELAY_LOG, and '${DOCKER} logs $NAME')"
+    echo "(no score.yaml in $RESULTS — check $POLICY_LOG, $RELAY_LOG, $ENGINE_LOG)"
 fi

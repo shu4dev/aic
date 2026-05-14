@@ -150,7 +150,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
         PART_FILE="$part_file" \
         RESULTS="$RESULTS_BASE" \
         bash "$SCRIPT_DIR/run_parallel.sh"
-    ) >> "$runner_log" 2>&1 &
+    ) > "$runner_log" 2>&1 &
     PIDS+=("$!")
     NAMES+=("aic_worker_${i}")
 done
