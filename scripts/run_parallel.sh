@@ -350,16 +350,16 @@ if [ "$zenoh_up" = "0" ]; then
 fi
 
 # Host-side ZENOH_CONFIG_OVERRIDE pointing the session at this worker's router.
-# Worker 0 uses the default 7447 + multicast off (existing behavior); workers
-# ≥1 need an explicit connect endpoint because they're not on the default port
-# the base aic_zenoh_config.json5 specifies (tcp/localhost:7447). Multicast is
-# already off in that base config but we re-assert it so a stray gossip packet
-# can't pull this session into another worker's fabric.
-if [ "$ROUTER_PORT" = "7447" ]; then
-    HOST_ZENOH_OVERRIDE="transport/shared_memory/enabled=false"
-else
-    HOST_ZENOH_OVERRIDE='connect/endpoints=["tcp/localhost:'"${ROUTER_PORT}"'"];scouting/multicast/enabled=false;transport/shared_memory/enabled=false'
-fi
+# Always pin connect/endpoints to the per-worker port and disable BOTH gossip
+# and multicast scouting. The base aic_zenoh_config.json5 has multicast off and
+# connect=tcp/localhost:7447 hardcoded, but gossip is enabled and worker N≥1's
+# router lives on a different port — so without these overrides the host policy
+# (worker 0 included, since gossip can pull it into another worker's fabric)
+# would not stay pinned to its own router.
+HOST_ZENOH_OVERRIDE='connect/endpoints=["tcp/localhost:'"${ROUTER_PORT}"'"]'
+HOST_ZENOH_OVERRIDE+=';scouting/gossip/enabled=false'
+HOST_ZENOH_OVERRIDE+=';scouting/multicast/enabled=false'
+HOST_ZENOH_OVERRIDE+=';transport/shared_memory/enabled=false'
 
 # --- Stage 3a: launch image_relay on host (mirrors T3) --------------------
 

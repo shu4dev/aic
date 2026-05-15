@@ -113,6 +113,8 @@ export ZENOH_ROUTER_CONFIG_URI=/aic_zenoh_config.json5
 ZENOH_CONFIG_OVERRIDE='mode="router"'
 ZENOH_CONFIG_OVERRIDE+=';listen/endpoints=["tcp/[::]:${port}"]'
 ZENOH_CONFIG_OVERRIDE+=';connect/endpoints=[]'
+ZENOH_CONFIG_OVERRIDE+=';scouting/gossip/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 ZENOH_CONFIG_OVERRIDE+=';routing/router/peers_failover_brokering=true'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
@@ -127,7 +129,17 @@ ZENOH_ROUTER_PID=\$!
 
 trap "kill -SIGINT -\$ZENOH_EVAL_ROUTER_PID -\$ZENOH_ROUTER_PID" EXIT
 
-ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
+# Peer override: the base aic_zenoh_config.json5 hardcodes
+# connect/endpoints=["tcp/localhost:7447"] and leaves gossip scouting on, so
+# without an override every in-container peer (aic_engine, aic_adapter,
+# gz_server, ros_gz_bridge) would connect to worker 0's router and gossip-merge
+# all N workers into one Zenoh mesh under --network host — splitting each
+# worker's aic_engine from its own host-side aic_model. Pin the connect
+# endpoint to this worker's router port and silence both scouting modes.
+ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/localhost:${port}"]'
+ZENOH_CONFIG_OVERRIDE+=';scouting/gossip/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"\$AIC_EVAL_PASSWD"'"'
