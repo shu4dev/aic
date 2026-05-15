@@ -63,6 +63,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Every python helper in scripts/ (split_trials.py, merge_scores.py, ...) is
+# expected to run inside the ~/.venv that scripts/lambda_bootstrap.sh built
+# from scripts/requirements.txt. Resolve a single VENV_PY here and use it
+# below instead of `pixi run python`, which would route through the heavy
+# ROS pixi env (and break on Lambda boxes that don't have one).
+VENV_PY="${VENV_PY:-$HOME/.venv/bin/python3}"
+if [ ! -x "$VENV_PY" ]; then
+    echo "error: $VENV_PY not found — re-run scripts/lambda_bootstrap.sh first" >&2
+    exit 1
+fi
+
 NUM_WORKERS="${NUM_WORKERS:-4}"
 INPUT_CONFIG="${INPUT_CONFIG:-$REPO_ROOT/aic_engine/config/train.yaml}"
 SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs}"
@@ -111,7 +122,7 @@ echo ""
 # --- Stage 1: split train.yaml into N parts -------------------------------
 
 echo "[orchestrator] Splitting trials..."
-pixi run python "$SCRIPT_DIR/split_trials.py" \
+"$VENV_PY" "$SCRIPT_DIR/split_trials.py" \
     --input "$INPUT_CONFIG" \
     --output-dir "$SPLIT_DIR" \
     --num-parts "$NUM_WORKERS"
@@ -185,7 +196,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
             num_trials_in_part="$(grep -c '^  trial_' "$part_file")"
             num_chunks=$(( (num_trials_in_part + CHUNK_TRIALS - 1) / CHUNK_TRIALS ))
             echo "[worker $i] splitting $num_trials_in_part trials into $num_chunks chunks of $CHUNK_TRIALS"
-            pixi run python "$SCRIPT_DIR/split_trials.py" \
+            "$VENV_PY" "$SCRIPT_DIR/split_trials.py" \
                 --input "$part_file" \
                 --output-dir "$worker_chunks_dir" \
                 --num-parts "$num_chunks"
@@ -265,7 +276,7 @@ fi
 echo "[orchestrator] Merging per-worker scores → $MERGED_OUTPUT"
 # Chunked layout: aic_results_<i>/chunk_<c>/scoring.yaml (one file per chunk
 # per worker). The non-chunked legacy path is also accepted as a fallback.
-pixi run python "$SCRIPT_DIR/merge_scores.py" \
+"$VENV_PY" "$SCRIPT_DIR/merge_scores.py" \
     --results-root "$RESULTS_BASE" \
     --pattern 'aic_results_*/chunk_*/scoring.yaml' \
     --output "$MERGED_OUTPUT" || true

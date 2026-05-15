@@ -38,8 +38,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATASET_DIR="${DATASET_DIR:-${HOME}/aic/aic_lerobot_dataset}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/home/ubuntu/aic-data/outputs/train}"
 
-# Auto-detect pixi vs system python (Lambda Stack has its own torch).
-if [[ -x "${REPO_ROOT}/.pixi/envs/default/bin/lerobot-train" ]]; then
+# Prefer ~/.venv (provisioned by scripts/lambda_bootstrap.sh from
+# scripts/requirements.txt), then fall back to pixi env, then system python.
+# We keep the legacy variable name PIXI_PYTHON to avoid touching every call
+# site below, but it now points at whichever interpreter actually has
+# lerobot-train installed.
+VENV_DIR="${VENV_DIR:-${HOME}/.venv}"
+if [[ -x "${VENV_DIR}/bin/lerobot-train" ]]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+    PIXI_PYTHON="${VENV_DIR}/bin/python3"
+    LEROBOT_TRAIN="${VENV_DIR}/bin/lerobot-train"
+    echo "Using ~/.venv at ${VENV_DIR}"
+elif [[ -x "${REPO_ROOT}/.pixi/envs/default/bin/lerobot-train" ]]; then
     PIXI_PYTHON="${REPO_ROOT}/.pixi/envs/default/bin/python3"
     LEROBOT_TRAIN="${REPO_ROOT}/.pixi/envs/default/bin/lerobot-train"
     echo "Using pixi env at ${REPO_ROOT}/.pixi/envs/default"
@@ -48,7 +59,8 @@ elif command -v lerobot-train >/dev/null 2>&1; then
     LEROBOT_TRAIN="$(command -v lerobot-train)"
     echo "Using system python: ${PIXI_PYTHON}"
 else
-    echo "ERROR: lerobot-train not found. Install LeRobot first:"
+    echo "ERROR: lerobot-train not found. Run scripts/lambda_bootstrap.sh"
+    echo "(which installs scripts/requirements.txt into ~/.venv), or:"
     echo "  pip install --user lerobot==0.5.1"
     exit 1
 fi

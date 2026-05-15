@@ -20,26 +20,44 @@
 #
 # Knobs (override on the make command line):
 #   BOXES=8                 number of Lambda instances
-#   WORKERS_PER_BOX=4       per-box NUM_WORKERS in run_parallel_multi.sh
+#   WORKERS_PER_BOX=1       per-box NUM_WORKERS in run_parallel_multi.sh.
+#                           Default 1 = fully serial per instance: one
+#                           container processes the box's whole shard in
+#                           CHUNK_TRIALS-sized chunks, recycling between
+#                           chunks. Bump to N for N parallel workers per
+#                           instance (each independently chunked).
 #   POLICY=...              policy module to load
 #   CONFIG=path/to.yaml     trial config to split + distribute
-#   INSTANCE_TYPE=gpu_1x_a100   Lambda type name
-#   REGION=us-east-1
+#   INSTANCE_TYPE=gpu_1x_a100_sxm4  Lambda type name
+#   REGION=us-west-2
+#   IMAGE_FAMILY=lambda-stack-24-04 Lambda image family (run `make images`
+#                                   to list available families). Required to
+#                                   be a Noble image — scripts/lambda_bootstrap.sh
+#                                   fast-fails on anything else.
+#   CHUNK_TRIALS=10         per-worker trials before its container is rm'd +
+#                           recreated (heap-corruption mitigation observed
+#                           past ~70 cumulative trials in one container).
+#                           Pass 0 to disable chunking.
+#   MAX_CHUNK_RETRIES=3     retries per failed chunk before giving up.
 #   RESULTS_DIR=./fleet_results
 
-PYTHON         ?= pixi run python
+PYTHON         ?= python3
 FLEET          := $(PYTHON) scripts/lambda_fleet.py
 
 BOXES          ?= 4
-WORKERS_PER_BOX?= 4
+WORKERS_PER_BOX?= 1
 POLICY         ?= aic_example_policies.ros.SCCheatCode
 CONFIG         ?= aic_engine/config/train.yaml
-INSTANCE_TYPE  ?= gpu_1x_a100
-REGION         ?= us-east-1
+INSTANCE_TYPE  ?= gpu_1x_a100_sxm4
+REGION         ?= us-west-2
+IMAGE_FAMILY   ?= lambda-stack-24-04
+CHUNK_TRIALS   ?= 10
+MAX_CHUNK_RETRIES ?= 3
 SSH_KEY        ?= $(USER)
+FILE_SYSTEM    ?= aic-data
 RESULTS_DIR    ?= ./fleet_results
 
-.PHONY: help types launch wait run status poll collect terminate all check-env
+.PHONY: help types images launch wait run status poll collect terminate all check-env
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) | \
@@ -52,12 +70,17 @@ check-env: ## verify LAMBDA_API_KEY is set
 types: check-env ## list instance types with capacity right now
 	$(FLEET) types
 
+images: check-env ## list image families available in $(REGION)
+	$(FLEET) images --region $(REGION)
+
 launch: check-env ## spin up BOXES=$(BOXES) instances
 	$(FLEET) launch \
 	    --num $(BOXES) \
 	    --region $(REGION) \
 	    --instance-type $(INSTANCE_TYPE) \
 	    --ssh-key $(SSH_KEY) \
+	    --image-family $(IMAGE_FAMILY) \
+	    $(if $(FILE_SYSTEM),--file-system $(FILE_SYSTEM),) \
 	    --bootstrap scripts/lambda_bootstrap.sh
 
 wait: check-env ## block until every box finishes bootstrap (~25 min cold)
@@ -67,7 +90,9 @@ run: check-env ## distribute CONFIG and start run_parallel_multi.sh on each box
 	$(FLEET) run \
 	    --config $(CONFIG) \
 	    --workers-per-box $(WORKERS_PER_BOX) \
-	    --policy $(POLICY)
+	    --policy $(POLICY) \
+	    --chunk $(CHUNK_TRIALS) \
+	    --max-chunk-retries $(MAX_CHUNK_RETRIES)
 
 status: check-env ## one-shot snapshot of bag counts + alive/dead per box
 	$(FLEET) status

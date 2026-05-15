@@ -67,7 +67,9 @@ apt-get update -qq
 apt-get install -y -qq \
     distrobox \
     git \
-    python3-venv \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     ffmpeg \
     jq \
     curl \
@@ -160,14 +162,21 @@ export PATH="\$HOME/.pixi/bin:\$PATH"
 cd \$HOME/ws_aic/src/aic
 # This is the slow step — ~15-20 min. Provisions the entire ROS Kilted env
 # + every local package (aic_model, aic_example_policies, …).
+pixi self-update --version 0.67.2
 pixi install
 
-# --- 5. ~/.venv for image_relay's cv2/numpy needs -------------------------
+# --- 5. ~/.venv (Python 3.12) shared by every scripts/*.py invocation -----
+# Built explicitly from python3.12 (not bare \`python3\`) so the venv interpreter
+# is pinned even if Ubuntu later defaults python3 to a newer minor. Every
+# shell wrapper in scripts/ that invokes a python script (run_parallel.sh,
+# run_parallel_multi.sh, train_lambda.sh, ...) must \`source ~/.venv/bin/activate\`
+# before exec'ing python — that contract is what lets us drop the prior
+# pixi-vs-system auto-detect dance.
 if [ ! -d \$HOME/.venv ]; then
-    python3 -m venv \$HOME/.venv
-    \$HOME/.venv/bin/pip install --quiet --upgrade pip
-    \$HOME/.venv/bin/pip install --quiet opencv-python-headless numpy mcap mcap-ros2-support
+    python3.12 -m venv \$HOME/.venv
 fi
+\$HOME/.venv/bin/pip install --quiet --upgrade pip
+\$HOME/.venv/bin/pip install --quiet -r \$HOME/ws_aic/src/aic/scripts/requirements.txt
 
 # --- 6. Pull the eval image + create distrobox workers --------------------
 if [ -n "${GHCR_TOKEN}" ]; then
@@ -176,7 +185,7 @@ fi
 sudo docker pull ghcr.io/shu4dev/aic-eval:v1
 
 # Match the original Lambda 1×A100 sizing assumed by run_parallel_multi.sh.
-NUM_WORKERS=4 bash scripts/setup_workers.sh
+NUM_WORKERS=1 bash scripts/setup_workers.sh
 
 EOSU
 
@@ -217,12 +226,19 @@ if ! sudo -u ubuntu bash -c \
     echo "  ✗ rclpy/sensor_msgs import failed"; fail=1
 else echo "  ✓ rclpy/sensor_msgs import"; fi
 
-# Host venv with cv2 + numpy (the image_relay imports).
+# Host venv on Python 3.12 with the scripts/requirements.txt set installed.
+# cv2 + numpy are the image_relay imports; mcap + yaml cover the conversion
+# and split/merge scripts that scripts/run_parallel_multi.sh invokes.
 if ! sudo -u ubuntu bash -c \
-        'source $HOME/.venv/bin/activate && python3 -c "import cv2, numpy"' \
+        'source $HOME/.venv/bin/activate && python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"' \
         >/dev/null 2>&1; then
-    echo "  ✗ venv cv2/numpy import failed"; fail=1
-else echo "  ✓ venv cv2/numpy"; fi
+    echo "  ✗ venv is not Python 3.12"; fail=1
+else echo "  ✓ venv on Python 3.12"; fi
+if ! sudo -u ubuntu bash -c \
+        'source $HOME/.venv/bin/activate && python3 -c "import cv2, numpy, mcap, yaml"' \
+        >/dev/null 2>&1; then
+    echo "  ✗ venv requirements.txt import failed"; fail=1
+else echo "  ✓ venv requirements.txt installed"; fi
 
 # aic_eval image is local + worker containers exist.
 if ! sudo docker image inspect ghcr.io/shu4dev/aic-eval:v1 >/dev/null 2>&1; then

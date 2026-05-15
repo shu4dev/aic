@@ -143,6 +143,49 @@ def cmd_types(_args: argparse.Namespace) -> None:
         print("no types have capacity right now")
 
 
+def cmd_images(args: argparse.Namespace) -> None:
+    """List image families available in a region. Use the printed `family`
+    value as --image-family on `launch` (or IMAGE_FAMILY=... via the
+    Makefile). We default to Lambda Stack 24.04 because scripts/lambda_bootstrap.sh
+    requires Ubuntu Noble; this command is how you confirm the slug or
+    discover the right one if Lambda renames the family."""
+    data = api_get("/images")
+    # /images returns a flat list of image objects, each tagged with region.
+    # We dedupe by (family, region) so the same family appearing in N regions
+    # collapses into one row with all regions listed.
+    seen: dict[str, dict[str, Any]] = {}
+    for img in data or []:
+        family = img.get("family") or img.get("name") or "<unknown>"
+        # /images schema is ambiguous about region — it appears as either a
+        # bare string ("us-west-2") or an object ({"name": "us-west-2", ...})
+        # in different docs. Handle both so we don't crash.
+        region_field = img.get("region")
+        if isinstance(region_field, dict):
+            region = region_field.get("name", "?")
+        elif isinstance(region_field, str):
+            region = region_field
+        else:
+            region = "?"
+        if args.region and region != args.region:
+            continue
+        entry = seen.setdefault(family, {
+            "description": img.get("description", ""),
+            "version": img.get("version", ""),
+            "architecture": img.get("architecture", ""),
+            "regions": set(),
+        })
+        entry["regions"].add(region)
+    if not seen:
+        print(f"no images returned for region={args.region!r}")
+        return
+    for family in sorted(seen):
+        e = seen[family]
+        regions = ",".join(sorted(e["regions"]))
+        meta_bits = [b for b in (e["version"], e["architecture"], e["description"]) if b]
+        meta = " — " + " | ".join(meta_bits) if meta_bits else ""
+        print(f"{family:35s} [{regions}]{meta}")
+
+
 def _render_bootstrap(path: pathlib.Path) -> str:
     """Substitute {{GHCR_TOKEN}} (and any future placeholders) in the
     bootstrap script. We do this client-side so the token never lives in
@@ -171,6 +214,12 @@ def cmd_launch(args: argparse.Namespace) -> None:
         "quantity": args.num,
         "user_data": bootstrap,
     }
+    # Pin the OS image. Required because Lambda's API default is not stable
+    # across (region, instance_type) combinations — we've seen it boot jammy
+    # (22.04) on gpu_1x_a100_sxm4/us-west-2, which the bootstrap's Noble
+    # precondition then rejects. Empty string opts back into Lambda's default.
+    if args.image_family:
+        payload["image"] = {"family": args.image_family}
     if args.file_system:
         payload["file_system_names"] = [args.file_system]
     if args.name:
@@ -284,6 +333,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"INPUT_CONFIG=/home/ubuntu/shard.yaml "
             f"STAGGER_SECS={args.stagger} "
             f"CHUNK_TRIALS={args.chunk} "
+            f"MAX_CHUNK_RETRIES={args.max_chunk_retries} "
             "nohup bash scripts/run_parallel_multi.sh "
             "> /home/ubuntu/run.log 2>&1 &"
         )
@@ -412,12 +462,23 @@ def main() -> None:
 
     sub.add_parser("types", help="list instance types with capacity").set_defaults(fn=cmd_types)
 
+    pi = sub.add_parser("images", help="list available image families")
+    pi.add_argument("--region", default="us-west-2",
+                    help="filter to one region (default us-west-2); pass '' for all")
+    pi.set_defaults(fn=cmd_images)
+
     pl = sub.add_parser("launch", help="launch N instances")
     pl.add_argument("--num", type=int, default=4, help="number of instances (default 4)")
-    pl.add_argument("--region", default="us-east-1")
-    pl.add_argument("--instance-type", default="gpu_1x_a100")
+    pl.add_argument("--region", default="us-west-2",
+                    help="Lambda region (default us-west-2)")
+    pl.add_argument("--instance-type", default="gpu_1x_a100_sxm4")
     pl.add_argument("--ssh-key", required=True,
                     help="name of an SSH key already registered with Lambda")
+    pl.add_argument("--image-family", default="lambda-stack-24-04",
+                    help="Lambda image family to boot (run `images` to list). "
+                         "Default pins to Lambda Stack 24.04 (Ubuntu Noble), which "
+                         "scripts/lambda_bootstrap.sh requires. Pass '' to fall "
+                         "back to Lambda's API default.")
     pl.add_argument("--file-system", default=None,
                     help="name of a Lambda persistent FS to attach (optional)")
     pl.add_argument("--bootstrap",
@@ -433,11 +494,22 @@ def main() -> None:
 
     pr = sub.add_parser("run", help="distribute shards + start collection")
     pr.add_argument("--config", required=True, help="trial config to split")
-    pr.add_argument("--workers-per-box", type=int, default=4)
+    pr.add_argument("--workers-per-box", type=int, default=1,
+                    help="NUM_WORKERS inside run_parallel_multi.sh. Default 1 "
+                         "= fully serial per box (one container processes the "
+                         "whole shard in CHUNK_TRIALS-sized chunks, recycling "
+                         "between chunks). Bump for parallel workers per box.")
     pr.add_argument("--policy", default="aic_example_policies.ros.SCCheatCode")
     pr.add_argument("--stagger", type=int, default=60)
-    pr.add_argument("--chunk", type=int, default=0,
-                    help="CHUNK_TRIALS (0 = no chunking, recommended for fleet mode)")
+    pr.add_argument("--chunk", type=int, default=10,
+                    help="CHUNK_TRIALS — trials per worker before its container is "
+                         "rm'd + recreated. Recycling between chunks prevents the "
+                         "heap corruption seen after ~70 cumulative trials in one "
+                         "container. Pass 0 to disable chunking.")
+    pr.add_argument("--max-chunk-retries", type=int, default=3,
+                    help="MAX_CHUNK_RETRIES — how many times run_parallel_multi.sh "
+                         "retries a failed chunk (recreate container + rerun) "
+                         "before giving up on it.")
     pr.set_defaults(fn=cmd_run)
 
     sub.add_parser("status", help="bag count snapshot").set_defaults(fn=cmd_status)
