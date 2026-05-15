@@ -17,7 +17,7 @@ The pipeline behind this guide lives in three files at the repo root:
 | `Makefile.lambda` | One-command wrappers around the Python driver (`make -f Makefile.lambda all …`). |
 
 > [!IMPORTANT]
-> **Base image must be Lambda Stack 24.04 (Ubuntu 24.04 Noble).** ROS 2 Kilted Kaiju is published only for Noble — there are no `ros-kilted-*` packages for `jammy` or earlier. `lambda_bootstrap.sh` hard-fails in ~1 second on any other base, so you'll catch this immediately; just make sure the launch payload requests Lambda Stack 24.04 (the default for `gpu_1x_a100`).
+> **Base image must be Lambda Stack 24.04 (Ubuntu 24.04 Noble).** ROS 2 Kilted Kaiju is published only for Noble — there are no `ros-kilted-*` packages for `jammy` or earlier. `Makefile.lambda` now **pins this explicitly** via `IMAGE_FAMILY=lambda-stack-24-04` (Lambda's API default has drifted to `jammy` on some region/type combinations, which is why we don't rely on it). `lambda_bootstrap.sh` also hard-fails in ~1 second on any non-Noble base, as a defense-in-depth check. Run `make -f Makefile.lambda images` if you ever need to discover the correct family slug for a new region.
 
 ---
 
@@ -63,6 +63,14 @@ gpu_1x_a10                     $0.75/hr  ['us-east-1']
 ```
 
 If you see nothing, A100 capacity is exhausted in every region right now — wait or pick a different type (e.g. `gpu_1x_a10` for a cheaper smoke test). If you get an authentication error, re-check `$LAMBDA_API_KEY`.
+
+Optionally, confirm the image family the fleet pins to is actually offered in your region:
+
+```bash
+make -f Makefile.lambda images
+```
+
+The default `IMAGE_FAMILY=lambda-stack-24-04` should appear. If you don't see it, pick the closest 24.04 family from the listing and pass `IMAGE_FAMILY=<slug>` to subsequent `make launch` calls.
 
 ---
 
@@ -111,7 +119,7 @@ You'll get `train_part_{0,1,2,3}.yaml` in `/tmp/fleet_shards/`. Each shard is in
 
 ## Step 4 — Launch the production fleet
 
-For 1500 trials at ~50% success rate, 4 boxes × N=4 workers gets you 1500 raw trials in ~9 hours. 8 boxes halves that. Pick `BOXES` accordingly.
+For 1500 trials at the current per-trial success rate, fleet sizing is `BOXES` ≈ ceil(total_trials / trials_per_box_per_run). With the defaults (`WORKERS_PER_BOX=1`, `CHUNK_TRIALS=10`), expect each box to chew through ~25-35 trials per hour wall-clock once boot-up settles. 4 boxes covers ~100 trials/hour; 8 boxes covers ~200/hour. Pick `BOXES` based on how soon you need the data and how many parallel A100s your account is willing to charge for.
 
 ```bash
 make -f Makefile.lambda launch BOXES=4
@@ -132,6 +140,8 @@ make -f Makefile.lambda run CONFIG=aic_engine/config/train.yaml
 ```
 
 This splits the input N ways, `scp`s one shard per box, then `ssh`s in and starts `run_parallel_multi.sh` under `nohup` so the run survives the SSH disconnect. The Python driver returns immediately — collection runs on the boxes, not your laptop.
+
+**Per-box topology (current defaults):** `WORKERS_PER_BOX=1`, `CHUNK_TRIALS=10`, `MAX_CHUNK_RETRIES=3`. Each box runs **one** worker container that processes its whole shard **sequentially**, in 10-trial chunks. The container is `docker rm -f`'d and recreated between chunks (idempotent recreate via `setup_workers.sh`) — this prevents the gz/Ogre/Zenoh heap-corruption observed after ~70 cumulative trials in a single long-lived container. A failed chunk is retried up to 3 times. If you'd rather trade reliability for wall-clock, bump `WORKERS_PER_BOX` (parallel workers per box, each independently chunked) or raise `CHUNK_TRIALS` for fewer recycles.
 
 To verify it actually started:
 
@@ -170,22 +180,26 @@ If you'd rather check in periodically yourself instead of blocking, use `status`
 make -f Makefile.lambda collect
 ```
 
-This rsyncs every box's `/home/ubuntu/aic-data/` to `./fleet_results/box_<i>/` on your local machine. Per-box layout:
+This rsyncs every box's `/home/ubuntu/aic-data/` to `./fleet_results/box_<i>/` on your local machine. With the default `WORKERS_PER_BOX=1`, there's exactly one `aic_results_0/` per box; if you bumped it, you'll see `aic_results_{0..N-1}/`. Per-worker, chunking always produces `chunk_<c>/` subdirs (default `CHUNK_TRIALS=10`):
 
 ```
 ./fleet_results/box_0/
 ├── aic_results_0/
-│   ├── chunk_*/                 # only if CHUNK_TRIALS > 0
-│   │   ├── bag_trial_*/         # MCAP recordings
-│   │   ├── scoring.yaml         # per-trial tier scores
+│   ├── chunk_0/
+│   │   ├── bag_trial_*/         # MCAP recordings (10 trials at most)
+│   │   ├── scoring.yaml         # per-trial tier scores for this chunk
 │   │   ├── engine.log
 │   │   └── policy.log
-│   └── score.yaml               # final summary (if engine completed)
-├── aic_results_1/
+│   ├── chunk_1/
+│   ├── chunk_2/
+│   └── ...
+│   (no top-level score.yaml — chunking writes per-chunk scoring.yaml)
 └── ...
 ```
 
-Each `bag_trial_*/*.mcap` is what you feed to `scripts/mcap_to_lerobot.py` to build a LeRobot dataset for training.
+`merge_scores.py` globs `aic_results_*/chunk_*/scoring.yaml` to produce one fleet-wide summary. Each `bag_trial_*/*.mcap` is what you feed to `scripts/mcap_to_lerobot.py` to build a LeRobot dataset for training.
+
+To disable chunking and revert to one long-lived container per worker (with a single `score.yaml` at the top of each `aic_results_<i>/`), pass `CHUNK_TRIALS=0` to `make run`.
 
 ---
 
@@ -221,11 +235,14 @@ All defaults are in `Makefile.lambda`; override on the command line.
 | Variable | Default | Meaning |
 |---|---|---|
 | `BOXES` | 4 | Number of Lambda instances |
-| `WORKERS_PER_BOX` | 4 | `NUM_WORKERS` passed to `run_parallel_multi.sh` (per-box parallel workers) |
+| `WORKERS_PER_BOX` | 1 | `NUM_WORKERS` passed to `run_parallel_multi.sh`. **Default 1 = fully serial per instance** (one container processes the whole shard, chunking and recycling between chunks). Bump for parallel workers per box, each independently chunked. |
+| `CHUNK_TRIALS` | 10 | Per-worker trials before its container is `docker rm`'d + recreated. Mitigation for heap corruption seen past ~70 cumulative trials in one container. Pass 0 to disable chunking. |
+| `MAX_CHUNK_RETRIES` | 3 | How many times `run_parallel_multi.sh` retries a failed chunk (recreate + rerun) before giving up. |
 | `POLICY` | `aic_example_policies.ros.SCCheatCode` | Policy module the participant `aic_model` loads |
 | `CONFIG` | `aic_engine/config/train.yaml` | Trial config to split + distribute |
-| `INSTANCE_TYPE` | `gpu_1x_a100` | Lambda instance type (see `make types`) |
-| `REGION` | `us-east-1` | Lambda region |
+| `INSTANCE_TYPE` | `gpu_1x_a100_sxm4` | Lambda instance type (see `make types`) |
+| `REGION` | `us-west-2` | Lambda region |
+| `IMAGE_FAMILY` | `lambda-stack-24-04` | Lambda image family slug. Pinned because the API default has drifted to jammy on some region/type combos. Run `make images` to list options. |
 | `SSH_KEY` | `$(USER)` | Name of the SSH key already registered with Lambda |
 | `RESULTS_DIR` | `./fleet_results` | Where `collect` lands data |
 
@@ -235,17 +252,25 @@ Example: cheaper smoke run on an A10:
 make -f Makefile.lambda launch BOXES=1 INSTANCE_TYPE=gpu_1x_a10
 ```
 
+Example: prioritize wall-clock over reliability — 4 parallel workers per box, larger chunks:
+
+```bash
+make -f Makefile.lambda run WORKERS_PER_BOX=4 CHUNK_TRIALS=20
+```
+
 ---
 
 ## Cost expectations
 
-| Fleet | Wall-clock for 1500 trials | Lambda compute cost (A100 @ $1.29/hr) |
+These rules of thumb were taken before chunking + serial-per-box became the default; treat them as upper-bound throughput for `WORKERS_PER_BOX=4`. With the new defaults (`WORKERS_PER_BOX=1`, chunked) wall-clock per box is roughly **2-2.5× longer** because workers no longer run in parallel inside a box, but the per-trial success rate is higher (no heap-corruption tail). The crossover usually favors the new defaults — fewer wasted trials means fewer total boxes-hours to hit a target number of *successful* demonstrations.
+
+| Fleet | Wall-clock for 1500 raw trials, `WORKERS_PER_BOX=4` | Lambda compute cost (A100 @ $1.29/hr) |
 |---|---|---|
 | 1 box × N=4 | ~9 hr | ~$12 |
 | 4 boxes × N=4 | ~4-5 hr (collection) + ~25 min (bootstrap × 4 in parallel) | ~$26 |
 | 8 boxes × N=4 | ~2-3 hr (collection) + ~25 min (bootstrap × 8 in parallel) | ~$30 |
 
-The total compute-hours stays roughly flat across fleet sizes (more boxes = same work, less time). What scales is wall-clock. Pick `BOXES` based on how soon you need the data.
+The total compute-hours stays roughly flat across fleet sizes (more boxes = same work, less time). What scales is wall-clock. Pick `BOXES` based on how soon you need the data, and `WORKERS_PER_BOX` based on whether you're optimizing for reliability (1, the default) or pure throughput (3-4, at the cost of more chunk failures).
 
 ---
 
@@ -262,16 +287,18 @@ sudo tail -200 /var/log/aic-bootstrap.log
 
 The bootstrap script prints `✓` / `✗` per sanity check before deciding whether to `touch .bootstrap_done`. Common failure lines:
 
-- `FATAL: this bootstrap requires Ubuntu 24.04 Noble` — wrong base image. Lambda Stack 24.04 is the only supported base. Terminate and re-launch.
+- `FATAL: this bootstrap requires Ubuntu 24.04 Noble` — should be rare now that `IMAGE_FAMILY=lambda-stack-24-04` is pinned at launch. If you see it, your `--image-family` override (or `IMAGE_FAMILY=` make-var) resolved to a non-Noble image. Run `make images` to list valid families and relaunch with the correct slug.
 - `FATAL: /proc/driver/nvidia/version not readable` — instance type has no NVIDIA driver. Wrong type — use `gpu_1x_*`.
 - `✗ docker --gpus all smoke failed` — NVIDIA Container Toolkit drift. Rare on Lambda Stack; usually means the image was changed manually.
 - `✗ rclpy/sensor_msgs import failed` — system ROS 2 Kilted apt install failed (likely a transient apt mirror issue). Re-launch.
+- `✗ venv requirements.txt import failed` — `~/.venv` is built from `scripts/requirements.txt` on Python 3.12. A package failed to install (usually transient pip/network); ssh in and rerun `~/.venv/bin/pip install -r ~/ws_aic/src/aic/scripts/requirements.txt` to see the real error.
+- `Error response from daemon: Get "https://ghcr.io/v2/": denied` — the `GHCR_TOKEN` placeholder wasn't substituted, or your PAT lacks `read:packages`. Confirm `echo $GHCR_TOKEN` is non-empty *before* `make launch` (it's baked into the user_data client-side), regenerate the PAT if needed, then relaunch.
 
 ### Some boxes finish, others hang
 
-Per-box `run_parallel_multi.sh` has its own watchdog (`scripts/run_parallel.sh:425-440`). If one box's gz_server hits the heap-corruption bug we documented elsewhere, its worker auto-retries; if all 4 workers on one box go down, that box's `nohup` process exits and `make status` shows it as `[exited]` with whatever bag count it reached. The other boxes are unaffected.
+Per-box `run_parallel_multi.sh` has its own retry loop around each chunk (default `MAX_CHUNK_RETRIES=3` — recreate the container + rerun the chunk's 10 trials). If a chunk burns through all three retries, it's skipped and the next chunk starts; the box's `nohup` process keeps going. If a box runs out of work entirely (all chunks attempted), `make status` shows it as `[exited]`. The other boxes are unaffected.
 
-If a box is stuck without producing new bags for >15 min, SSH in and inspect `/home/ubuntu/run.log` (the stdout of `run_parallel_multi.sh`).
+If a box is stuck without producing new bags for >15 min, SSH in and inspect `/home/ubuntu/run.log` (the stdout of `run_parallel_multi.sh`). Look for repeated `[worker N chunk M attempt 3] failed` — that's the retry budget being exhausted on a specific chunk. Raising `MAX_CHUNK_RETRIES` on the next run rarely helps unless the failure is transient; usually it indicates a problem with that specific trial config or an apt mirror flake during container recreate.
 
 ### Successful trials are ~50% of total
 
@@ -298,12 +325,12 @@ If `~/.lambda_fleet/fleet.json` still exists, run `make terminate` — it'll cat
 
 For context — you don't need to touch any of this — here's the flow:
 
-1. **`launch`** posts to `POST /instance-operations/launch` with `quantity=$BOXES` and `user_data` set to the contents of `lambda_bootstrap.sh` (with `{{GHCR_TOKEN}}` substituted from your env). Instance IDs persist to `~/.lambda_fleet/fleet.json` immediately.
-2. **Lambda's cloud-init** runs `lambda_bootstrap.sh` as root on each box's first boot. The script: precondition-checks Noble, installs apt prereqs (including driver-matched `libnvidia-gl-${MAJOR}-server`), sets up the ROS Kilted apt repo, clones the repo, runs `pixi install`, builds `~/.venv`, pulls the eval image, runs `setup_workers.sh` to create 4 distrobox workers, runs 8 post-install sanity assertions, and only then `touch /home/ubuntu/.bootstrap_done`.
+1. **`launch`** posts to `POST /instance-operations/launch` with `quantity=$BOXES`, `image={"family": "$IMAGE_FAMILY"}` (default `lambda-stack-24-04`), and `user_data` set to the contents of `lambda_bootstrap.sh` (with `{{GHCR_TOKEN}}` substituted from your env). Instance IDs persist to `~/.lambda_fleet/fleet.json` immediately.
+2. **Lambda's cloud-init** runs `lambda_bootstrap.sh` as root on each box's first boot. The script: precondition-checks Noble, installs apt prereqs (including driver-matched `libnvidia-gl-${MAJOR}-server` and `python3.12` + `python3.12-venv`), sets up the ROS Kilted apt repo, clones the repo, runs `pixi install`, builds `~/.venv` from `scripts/requirements.txt` on Python 3.12 (shared by every `scripts/*.py` invocation), pulls the eval image, runs `setup_workers.sh` to create the distrobox workers, runs post-install sanity assertions, and only then `touch /home/ubuntu/.bootstrap_done`.
 3. **`wait`** polls `GET /instances` for `status=active` + IP, then polls each box via `ssh test -f ~/.bootstrap_done`. A failed assertion in step 2 means the marker never appears and `wait` hits its timeout, which is intentional — better than `run` blowing up later on a half-working box.
-4. **`run`** calls `pixi run python scripts/split_trials.py` locally to shard the config, `scp`s one shard per box, then `ssh`s in and does `nohup bash scripts/run_parallel_multi.sh > ~/run.log 2>&1 &`. The driver returns instantly; collection runs detached on the boxes.
+4. **`run`** uses `~/.venv/bin/python3 scripts/split_trials.py` locally to shard the config, `scp`s one shard per box, then `ssh`s in with `CHUNK_TRIALS=10 MAX_CHUNK_RETRIES=3 NUM_WORKERS=1 nohup bash scripts/run_parallel_multi.sh > ~/run.log 2>&1 &`. `run_parallel_multi.sh` further chunks each worker's shard, recreating the container between chunks. The driver returns instantly; collection runs detached on the boxes.
 5. **`status` / `poll`** ssh in and run `find /home/ubuntu/aic-data -name 'bag_trial_*' | wc -l` plus `pgrep -f run_parallel_multi.sh` to know "X bags collected, alive/dead".
-6. **`collect`** rsyncs each box's `/home/ubuntu/aic-data/` to local `./fleet_results/box_<i>/`.
+6. **`collect`** rsyncs each box's `/home/ubuntu/aic-data/` (including the `chunk_*/` subdirs) to local `./fleet_results/box_<i>/`.
 7. **`terminate`** posts to `POST /instance-operations/terminate` with the stored IDs, then deletes the state file.
 
-If you want to read the actual API responses or change behavior, the entire driver is ~310 lines in `scripts/lambda_fleet.py`.
+The driver lives in `scripts/lambda_fleet.py` — read it if you want to change behavior or inspect the API responses directly.
