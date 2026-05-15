@@ -211,15 +211,24 @@ done
 cat <<MSG
 
 Next steps:
-  - Verify NVIDIA EGL works inside one of them. The env var matters: libglvnd
-    needs __EGL_VENDOR_LIBRARY_FILENAMES set to actually pick NVIDIA's ICD,
-    otherwise eglinfo silently falls back to llvmpipe even though the libs and
-    /dev/nvidia* are all present:
+  - Verify NVIDIA EGL works inside one of them. Two things matter here:
+    (1) __EGL_VENDOR_LIBRARY_FILENAMES pins libglvnd to NVIDIA's ICD; without
+        it, libglvnd loads both NVIDIA and Mesa, and the platform that
+        succeeds first wins.
+    (2) Pass -B to eglinfo to skip the GBM/X11 platform probes and test the
+        Surfaceless platform directly. On Lambda's open NVIDIA kernel module,
+        libdrm doesn't expose a /dev/dri driver-name association
+        (eglinfo prints "pci id … driver (null)"), so NVIDIA's GBM probe
+        fails. That GBM failure is benign — Ogre2 / gz-rendering use
+        Surfaceless / EGL_PLATFORM_DEVICE_EXT for headless, which works:
       sudo docker exec \\
           -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \\
-          ${NAME_PREFIX}_0 eglinfo 2>&1 | grep -iE 'vendor|renderer|nvidia' | head -5
+          ${NAME_PREFIX}_0 eglinfo -B 2>&1 | grep -iE 'vendor|renderer|nvidia' | head -5
     Expected output starts with "EGL vendor string: NVIDIA" and includes a line
-    like "OpenGL core profile renderer: NVIDIA …".
+    like "OpenGL core profile renderer: NVIDIA A100-SXM4-40GB/PCIe/SSE2".
+    If you instead see "EGL vendor string: Mesa Project / kms_swrast" from
+    bare \`eglinfo\` (no -B), that's the GBM-default red herring, not a real
+    failure.
 
   - Run an eval worker (run_parallel.sh sets the EGL env automatically):
       bash scripts/run_parallel.sh                      # uses ${NAME_PREFIX}_0
