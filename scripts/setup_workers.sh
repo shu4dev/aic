@@ -229,20 +229,21 @@ done
 cat <<MSG
 
 Next steps:
-  - Verify GPU access inside one of them. \`nvidia-smi\` is the authoritative
-    check — if it shows the A100, NVIDIA libs + /dev/nvidia* + bind-mounts
-    are all good:
-      sudo docker exec ${NAME_PREFIX}_0 nvidia-smi --query-gpu=name,driver_version --format=csv
-    Expected: \`NVIDIA A100-SXM4-40GB, 580.105.08\` (or similar).
-    Do NOT use \`eglinfo\` as a smoke test on this host. Lambda's open NVIDIA
-    kernel module doesn't expose a libdrm \`/dev/dri\` driver-name association
-    (\`eglinfo\` prints "pci id … driver (null)"), so NVIDIA's GBM/X11 EGL
-    probes both fail. Bare \`eglinfo\` then falls back to Mesa's kms_swrast,
-    and various flag combinations (\`-B\`, \`__EGL_VENDOR_LIBRARY_FILENAMES\`,
-    etc.) print empty or misleading output. None of that affects the eval:
-    Ogre2 / gz-rendering use Surfaceless / EGL_PLATFORM_DEVICE_EXT, which
-    works fine on this host. The only ground-truth test is running the eval
-    itself (next bullet).
+  - Quick sanity check that distrobox --nvidia did its job. These three
+    commands all return non-empty if GPU passthrough is wired up; if any
+    returns empty, recreate the container:
+      sudo docker exec ${NAME_PREFIX}_0 ls /dev/nvidia0
+      sudo docker exec ${NAME_PREFIX}_0 ls /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0
+      sudo docker exec ${NAME_PREFIX}_0 ls /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+    Do NOT use \`eglinfo\` or \`nvidia-smi\` as a smoke test:
+    * \`nvidia-smi\`: not bind-mounted into the container by distrobox --nvidia.
+    * \`eglinfo\`: on Lambda's open NVIDIA kernel module, libdrm doesn't expose
+      a \`/dev/dri\` driver-name association ("pci id … driver (null)"), so
+      NVIDIA's GBM/X11 EGL probes fail. eglinfo then falls back to Mesa's
+      kms_swrast or prints empty (depending on flags). None of that breaks
+      the eval — Ogre2 / gz-rendering use Surfaceless / EGL_PLATFORM_DEVICE_EXT
+      for headless rendering, which works fine on this host.
+    The only ground-truth GPU test is running the eval (next bullet).
 
   - Run an eval worker (run_parallel.sh sets the EGL env automatically):
       bash scripts/run_parallel.sh                      # uses ${NAME_PREFIX}_0
