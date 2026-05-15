@@ -211,24 +211,20 @@ done
 cat <<MSG
 
 Next steps:
-  - Verify NVIDIA EGL works inside one of them. Two things matter here:
-    (1) __EGL_VENDOR_LIBRARY_FILENAMES pins libglvnd to NVIDIA's ICD; without
-        it, libglvnd loads both NVIDIA and Mesa, and the platform that
-        succeeds first wins.
-    (2) Pass -B to eglinfo to skip the GBM/X11 platform probes and test the
-        Surfaceless platform directly. On Lambda's open NVIDIA kernel module,
-        libdrm doesn't expose a /dev/dri driver-name association
-        (eglinfo prints "pci id … driver (null)"), so NVIDIA's GBM probe
-        fails. That GBM failure is benign — Ogre2 / gz-rendering use
-        Surfaceless / EGL_PLATFORM_DEVICE_EXT for headless, which works:
-      sudo docker exec \\
-          -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \\
-          ${NAME_PREFIX}_0 eglinfo -B 2>&1 | grep -iE 'vendor|renderer|nvidia' | head -5
-    Expected output starts with "EGL vendor string: NVIDIA" and includes a line
-    like "OpenGL core profile renderer: NVIDIA A100-SXM4-40GB/PCIe/SSE2".
-    If you instead see "EGL vendor string: Mesa Project / kms_swrast" from
-    bare \`eglinfo\` (no -B), that's the GBM-default red herring, not a real
-    failure.
+  - Verify GPU access inside one of them. \`nvidia-smi\` is the authoritative
+    check — if it shows the A100, NVIDIA libs + /dev/nvidia* + bind-mounts
+    are all good:
+      sudo docker exec ${NAME_PREFIX}_0 nvidia-smi --query-gpu=name,driver_version --format=csv
+    Expected: \`NVIDIA A100-SXM4-40GB, 580.105.08\` (or similar).
+    Do NOT use \`eglinfo\` as a smoke test on this host. Lambda's open NVIDIA
+    kernel module doesn't expose a libdrm \`/dev/dri\` driver-name association
+    (\`eglinfo\` prints "pci id … driver (null)"), so NVIDIA's GBM/X11 EGL
+    probes both fail. Bare \`eglinfo\` then falls back to Mesa's kms_swrast,
+    and various flag combinations (\`-B\`, \`__EGL_VENDOR_LIBRARY_FILENAMES\`,
+    etc.) print empty or misleading output. None of that affects the eval:
+    Ogre2 / gz-rendering use Surfaceless / EGL_PLATFORM_DEVICE_EXT, which
+    works fine on this host. The only ground-truth test is running the eval
+    itself (next bullet).
 
   - Run an eval worker (run_parallel.sh sets the EGL env automatically):
       bash scripts/run_parallel.sh                      # uses ${NAME_PREFIX}_0
