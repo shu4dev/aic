@@ -200,36 +200,43 @@ def _render_bootstrap(path: pathlib.Path) -> str:
 
 
 def cmd_launch(args: argparse.Namespace) -> None:
-    """Launch N instances. Persists fleet IDs immediately so a Ctrl-C
-    later still lets `terminate` find them."""
+    """Launch args.num instances, one API call per instance.
+
+    Lambda's launch API enforces a per-call quantity ceiling that depends on
+    current capacity in the region/type. When A100 capacity is tight we see
+    400 "Specify at most 1 instances for 'quantity'." Looping per-instance
+    works around this and is robust whether Lambda's current cap is 1 or N.
+    State is persisted after each successful launch so a mid-loop failure
+    still leaves you able to `terminate` the IDs that did come up — a Ctrl-C
+    here doesn't leak instances.
+    """
     if state_file().exists():
         sys.exit(f"fleet state already exists at {state_file()} — "
                  f"run `terminate` first or remove it manually")
 
     bootstrap = _render_bootstrap(pathlib.Path(args.bootstrap))
-    payload: dict[str, Any] = {
-        "region_name": args.region,
-        "instance_type_name": args.instance_type,
-        "ssh_key_names": [args.ssh_key],
-        "quantity": args.num,
-        "user_data": bootstrap,
-    }
     # Pin the OS image. Required because Lambda's API default is not stable
     # across (region, instance_type) combinations — we've seen it boot jammy
     # (22.04) on gpu_1x_a100_sxm4/us-west-2, which the bootstrap's Noble
     # precondition then rejects. Empty string opts back into Lambda's default.
+    base_payload: dict[str, Any] = {
+        "region_name": args.region,
+        "instance_type_name": args.instance_type,
+        "ssh_key_names": [args.ssh_key],
+        "quantity": 1,
+        "user_data": bootstrap,
+    }
     if args.image_family:
-        payload["image"] = {"family": args.image_family}
+        base_payload["image"] = {"family": args.image_family}
     if args.file_system:
-        payload["file_system_names"] = [args.file_system]
+        base_payload["file_system_names"] = [args.file_system]
     if args.name:
-        payload["name"] = args.name
+        base_payload["name"] = args.name
 
-    data = api_post("/instance-operations/launch", payload)
-    ids = data["instance_ids"]
-    state = {
-        "instance_ids": ids,
-        "instances": [{"id": i, "ip": None, "status": "pending"} for i in ids],
+    all_ids: list[str] = []
+    state: dict[str, Any] = {
+        "instance_ids": all_ids,
+        "instances": [],
         "launch": {
             "region": args.region,
             "instance_type": args.instance_type,
@@ -237,10 +244,36 @@ def cmd_launch(args: argparse.Namespace) -> None:
             "time": time.time(),
         },
     }
-    save_state(state)
-    print(f"launched {len(ids)} instances:")
-    for i in ids:
-        print(f"  {i}")
+
+    print(f"launching {args.num} instance(s), one at a time...")
+    for i in range(args.num):
+        r = requests.post(f"{API}/instance-operations/launch",
+                          headers=headers(), json=base_payload, timeout=30)
+        if not r.ok:
+            print(f"  ✗ launch {i+1}/{args.num} failed: "
+                  f"{r.status_code} {r.text}", file=sys.stderr)
+            if all_ids:
+                # Save what we have before bailing — terminate must be able to
+                # find the IDs that did come up.
+                save_state(state)
+                print(f"\n{len(all_ids)} of {args.num} instance(s) did launch "
+                      f"and are persisted in {state_file()}.", file=sys.stderr)
+                print("Run `terminate` when you're done with them, or `wait` "
+                      "to bootstrap them and run on a smaller fleet.",
+                      file=sys.stderr)
+            sys.exit(1)
+
+        ids = (r.json().get("data") or {}).get("instance_ids") or []
+        all_ids.extend(ids)
+        for instance_id in ids:
+            state["instances"].append({"id": instance_id, "ip": None,
+                                       "status": "pending"})
+        save_state(state)  # persist after every success
+        print(f"  ✓ {len(all_ids)}/{args.num}: {','.join(ids)}")
+
+    print(f"\nlaunched {len(all_ids)} instances:")
+    for instance_id in all_ids:
+        print(f"  {instance_id}")
     print("\nrun `wait` next; remember to `terminate` when you're done.")
 
 
