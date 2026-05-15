@@ -180,7 +180,7 @@ If you'd rather check in periodically yourself instead of blocking, use `status`
 make -f Makefile.lambda collect
 ```
 
-This rsyncs every box's `/home/ubuntu/aic-data/` to `./fleet_results/box_<i>/` on your local machine. With the default `WORKERS_PER_BOX=1`, there's exactly one `aic_results_0/` per box; if you bumped it, you'll see `aic_results_{0..N-1}/`. Per-worker, chunking always produces `chunk_<c>/` subdirs (default `CHUNK_TRIALS=10`):
+This rsyncs each box's **scoped subtree** (`/home/ubuntu/aic-data/box_<i>/`) to `./fleet_results/box_<i>/`. The per-box scoping is what lets every instance share the `aic-data` Lambda persistent filesystem without colliding — see the [Shared-FS scoping](#shared-fs-scoping) section below for the full layout. With the default `WORKERS_PER_BOX=1`, there's exactly one `aic_results_0/` per box; if you bumped it, you'll see `aic_results_{0..N-1}/`. Per-worker, chunking always produces `chunk_<c>/` subdirs (default `CHUNK_TRIALS=10`):
 
 ```
 ./fleet_results/box_0/
@@ -193,11 +193,84 @@ This rsyncs every box's `/home/ubuntu/aic-data/` to `./fleet_results/box_<i>/` o
 │   ├── chunk_1/
 │   ├── chunk_2/
 │   └── ...
-│   (no top-level score.yaml — chunking writes per-chunk scoring.yaml)
+└── merged_score.yaml            # this box's chunk-merge output
+```
+
+To merge across the whole fleet after `collect`:
+```bash
+~/.venv/bin/python3 scripts/merge_scores.py \
+    --results-root ./fleet_results \
+    --pattern 'box_*/aic_results_*/chunk_*/scoring.yaml' \
+    --output ./fleet_results/merged_score.yaml
+```
+
+Each `bag_trial_*/*.mcap` is what you feed to `scripts/mcap_to_lerobot.py` to build a LeRobot dataset for training.
+
+## Shared-FS scoping
+
+The fleet attaches one Lambda persistent filesystem (`--file-system aic-data`, default name `aic-data`) to **every** box. Lambda mounts it at `/lambda/nfs/aic-data/` and the bootstrap symlinks that to `/home/ubuntu/aic-data` so the collection scripts (which all hardcode the latter path) write into the shared FS automatically.
+
+To prevent collisions when N instances write concurrently, every output path is scoped by a `BOX_PREFIX` (= `BOX_INDEX` 0..N-1 passed by the fleet driver, falling back to `$(hostname)` for direct shell users). The on-FS layout while a run is in flight:
+
+```
+/home/ubuntu/aic-data/                       # symlinked to /lambda/nfs/aic-data/
+├── aic_split_configs/
+│   ├── box_0/                                # this box's input shard split N ways
+│   ├── box_1/
+│   └── ...
+├── worker_entrypoints/
+│   ├── box_0/entrypoint_0.sh                 # per-worker Zenoh-port template
+│   ├── box_1/entrypoint_0.sh
+│   └── ...
+├── box_0/                                    # this box's results
+│   ├── aic_results_0/chunk_0/...
+│   ├── aic_results_0/chunk_1/...
+│   └── merged_score.yaml
+├── box_1/
 └── ...
 ```
 
-`merge_scores.py` globs `aic_results_*/chunk_*/scoring.yaml` to produce one fleet-wide summary. Each `bag_trial_*/*.mcap` is what you feed to `scripts/mcap_to_lerobot.py` to build a LeRobot dataset for training.
+Direct consequence for `status` / `poll`: the fleet driver scopes `find` to `/home/ubuntu/aic-data/box_<idx>/` per ssh call, so each row of `make status` shows only that box's bag count even though every box can see every other box's outputs over NFS.
+
+### Capacity planning
+
+At a median of **1.3 GB / trial** (measured on the existing recorded trials in the repo — worst case ~3 GB for trials that run the full 180 s task timeout), the shared filesystem must be sized for the **total fleet output**, not per box:
+
+| Target trials | Median footprint (1.3 GB) | Worst case (3 GB) |
+|---|---|---|
+| 500 | 0.65 TiB | 1.5 TiB |
+| 1,000 | 1.3 TiB | 3 TiB |
+| 2,000 | 2.6 TiB | 6 TiB |
+
+The bootstrap surfaces free space at boot:
+```
+ssh ubuntu@<ip> 'grep "Shared FS free space" /var/log/aic-bootstrap.log'
+# Shared FS free space: 5120 GB on /lambda/nfs/aic-data
+```
+
+It also prints a soft warning if free space at boot is under 200 GB (~150 trials of headroom). The warning is non-fatal — top-up runs on a near-full FS are a valid use case — but it shows up in the bootstrap log for the record.
+
+While a run is in flight, `make status` and `make poll` both print the current shared-FS free GB so you can watch headroom shrink:
+```
+$ make -f Makefile.lambda status
+  box 0 1.2.3.4:    47 bags  [running]
+  box 1 1.2.3.5:    52 bags  [running]
+  ...
+shared FS free: 4870 GB  (~3746 trials @ 1.3 GB)
+```
+
+If you see free GB approaching zero mid-run, `make terminate` early — `make collect` then rsyncs whatever completed chunks landed before the fill-up. The bag writer in `aic_engine` returns false from `StartRecording()` on disk-full, so trials become "failed" rather than corrupt; you won't lose chunks that had already landed.
+
+### Local SSD usage (the 0.5 TiB number)
+
+The Lambda instance root disk (`/home/ubuntu/` and below, excluding the `/home/ubuntu/aic-data` symlink) only holds:
+
+- OS + Lambda Stack: ~30 GB
+- The aic-eval container image + worker container layers: ~5-10 GB
+- The cloned repo + pixi env (`.pixi/envs/default`): ~10-15 GB
+- The host-side `~/.venv` and ROS Kilted apt packages: ~5 GB
+
+Total: ~50-60 GB used out of 500 GB. The local SSD is **not** a concern as long as `/home/ubuntu/aic-data` is the shared-FS symlink (verified by the bootstrap and by the "Mounted shared FS" line in `/var/log/aic-bootstrap.log`). If that symlink fails to land, the fallback warning at boot tells you, and you have ~390 trials of headroom on local SSD before fill — enough to abort and re-attach the FS.
 
 To disable chunking and revert to one long-lived container per worker (with a single `score.yaml` at the top of each `aic_results_<i>/`), pass `CHUNK_TRIALS=0` to `make run`.
 
@@ -325,12 +398,12 @@ If `~/.lambda_fleet/fleet.json` still exists, run `make terminate` — it'll cat
 
 For context — you don't need to touch any of this — here's the flow:
 
-1. **`launch`** posts to `POST /instance-operations/launch` with `quantity=$BOXES`, `image={"family": "$IMAGE_FAMILY"}` (default `lambda-stack-24-04`), and `user_data` set to the contents of `lambda_bootstrap.sh` (with `{{GHCR_TOKEN}}` substituted from your env). Instance IDs persist to `~/.lambda_fleet/fleet.json` immediately.
-2. **Lambda's cloud-init** runs `lambda_bootstrap.sh` as root on each box's first boot. The script: precondition-checks Noble, installs apt prereqs (including driver-matched `libnvidia-gl-${MAJOR}-server` and `python3.12` + `python3.12-venv`), sets up the ROS Kilted apt repo, clones the repo, runs `pixi install`, builds `~/.venv` from `scripts/requirements.txt` on Python 3.12 (shared by every `scripts/*.py` invocation), pulls the eval image, runs `setup_workers.sh` to create the distrobox workers, runs post-install sanity assertions, and only then `touch /home/ubuntu/.bootstrap_done`.
+1. **`launch`** posts to `POST /instance-operations/launch` with `quantity=$BOXES`, `image={"family": "$IMAGE_FAMILY"}` (default `lambda-stack-24-04`), `file_system_names=["aic-data"]` (default), and `user_data` set to the contents of `lambda_bootstrap.sh` (with `{{GHCR_TOKEN}}` substituted from your env). Instance IDs persist to `~/.lambda_fleet/fleet.json` immediately.
+2. **Lambda's cloud-init** runs `lambda_bootstrap.sh` as root on each box's first boot. The script: precondition-checks Noble, installs apt prereqs (including driver-matched `libnvidia-gl-${MAJOR}-server` and `python3.12` + `python3.12-venv`), sets up the ROS Kilted apt repo, clones the repo, **symlinks `/home/ubuntu/aic-data` → `/lambda/nfs/aic-data` so all collection writes land on the shared persistent FS**, runs `pixi install`, builds `~/.venv` from `scripts/requirements.txt` on Python 3.12 (shared by every `scripts/*.py` invocation), pulls the eval image, runs `setup_workers.sh` to pre-warm one distrobox worker as a smoke test, runs post-install sanity assertions, and only then `touch /home/ubuntu/.bootstrap_done`.
 3. **`wait`** polls `GET /instances` for `status=active` + IP, then polls each box via `ssh test -f ~/.bootstrap_done`. A failed assertion in step 2 means the marker never appears and `wait` hits its timeout, which is intentional — better than `run` blowing up later on a half-working box.
-4. **`run`** uses `~/.venv/bin/python3 scripts/split_trials.py` locally to shard the config, `scp`s one shard per box, then `ssh`s in with `CHUNK_TRIALS=10 MAX_CHUNK_RETRIES=3 NUM_WORKERS=1 nohup bash scripts/run_parallel_multi.sh > ~/run.log 2>&1 &`. `run_parallel_multi.sh` further chunks each worker's shard, recreating the container between chunks. The driver returns instantly; collection runs detached on the boxes.
-5. **`status` / `poll`** ssh in and run `find /home/ubuntu/aic-data -name 'bag_trial_*' | wc -l` plus `pgrep -f run_parallel_multi.sh` to know "X bags collected, alive/dead".
-6. **`collect`** rsyncs each box's `/home/ubuntu/aic-data/` (including the `chunk_*/` subdirs) to local `./fleet_results/box_<i>/`.
+4. **`run`** uses `~/.venv/bin/python3 scripts/split_trials.py` locally to shard the config, `scp`s one shard per box, then `ssh`s in with `BOX_INDEX={idx} CHUNK_TRIALS=10 MAX_CHUNK_RETRIES=3 NUM_WORKERS=1 nohup bash scripts/run_parallel_multi.sh > ~/run.log 2>&1 &`. `BOX_INDEX` is what scopes every output path under `aic-data/box_<idx>/` so concurrent boxes don't collide. `run_parallel_multi.sh` further chunks each worker's shard, recreating the container between chunks. The driver returns instantly; collection runs detached on the boxes.
+5. **`status` / `poll`** ssh in and run `find /home/ubuntu/aic-data/box_<idx> -name 'bag_trial_*' | wc -l` plus `pgrep -f run_parallel_multi.sh` to know "X bags collected, alive/dead" for **just this box's slice** of the shared FS.
+6. **`collect`** rsyncs each box's `/home/ubuntu/aic-data/box_<idx>/` to local `./fleet_results/box_<i>/` (per-box scope only — every box can see every other box's outputs over NFS, but we pull each subtree from its owning box to keep the layout one-to-one with the fleet state).
 7. **`terminate`** posts to `POST /instance-operations/terminate` with the stored IDs, then deletes the state file.
 
 The driver lives in `scripts/lambda_fleet.py` — read it if you want to change behavior or inspect the API responses directly.

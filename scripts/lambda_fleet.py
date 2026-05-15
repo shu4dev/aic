@@ -329,6 +329,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         remote = (
             "cd ~/ws_aic/src/aic && "
             f"NUM_WORKERS={args.workers_per_box} "
+            f"BOX_INDEX={idx} "
             f"POLICY={args.policy} "
             f"INPUT_CONFIG=/home/ubuntu/shard.yaml "
             f"STAGGER_SECS={args.stagger} "
@@ -351,9 +352,12 @@ def cmd_run(args: argparse.Namespace) -> None:
           f"block until all finish.")
 
 
-def _bag_count(ip: str) -> int:
+def _bag_count(ip: str, idx: int) -> int:
+    # Scope to this box's subtree on the shared aic-data FS. Otherwise every
+    # box's find would walk every other box's results too (same NFS mount) and
+    # status would report identical inflated counts for every row.
     r = ssh(ip,
-            "find /home/ubuntu/aic-data -maxdepth 4 -type d "
+            f"find /home/ubuntu/aic-data/box_{idx} -maxdepth 4 -type d "
             "-name 'bag_trial_*' 2>/dev/null | wc -l",
             check=False, capture=True)
     try:
@@ -368,13 +372,27 @@ def _is_running(ip: str) -> bool:
     return "YES" in (r.stdout or "")
 
 
+def _fs_free_gb(ip: str) -> int:
+    """Free GB on /home/ubuntu/aic-data (= the shared Lambda persistent FS
+    via the symlink set up by lambda_bootstrap.sh). All N boxes mount the same
+    FS so this returns the same number from every box; status/poll therefore
+    only need to call it once per snapshot."""
+    r = ssh(ip,
+            "df -P /home/ubuntu/aic-data | awk 'NR==2 {print int($4/1024/1024)}'",
+            check=False, capture=True)
+    try:
+        return int((r.stdout or "0").strip())
+    except ValueError:
+        return -1
+
+
 def cmd_status(_args: argparse.Namespace) -> None:
     """Snapshot of bag count + alive/dead per box."""
     state = load_state()
     total = 0
     for idx, inst in enumerate(state["instances"]):
         ip = inst["ip"]
-        bags = _bag_count(ip)
+        bags = _bag_count(ip, idx)
         alive = "running" if _is_running(ip) else "exited"
         print(f"  box {idx} {ip}: {bags:5d} bags  [{alive}]")
         total += max(0, bags)
@@ -383,6 +401,14 @@ def cmd_status(_args: argparse.Namespace) -> None:
         rate = total / max(1, elapsed / 60)
         print(f"\ntotal: {total} bags, {elapsed//60} min elapsed, "
               f"{rate:.2f} bag/min aggregate")
+    # Shared FS capacity check. One df call against any box is enough since
+    # all boxes mount the same FS. ~1.3 GB/trial median → free_gb*100/130 is
+    # the rough trial-headroom estimate.
+    if state["instances"]:
+        free_gb = _fs_free_gb(state["instances"][0]["ip"])
+        if free_gb >= 0:
+            print(f"shared FS free: {free_gb} GB  "
+                  f"(~{free_gb * 100 // 130} trials @ 1.3 GB)")
 
 
 def cmd_poll(args: argparse.Namespace) -> None:
@@ -391,9 +417,12 @@ def cmd_poll(args: argparse.Namespace) -> None:
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         alive = sum(1 for inst in state["instances"] if _is_running(inst["ip"]))
-        total = sum(max(0, _bag_count(inst["ip"])) for inst in state["instances"])
+        total = sum(max(0, _bag_count(inst["ip"], idx))
+                    for idx, inst in enumerate(state["instances"]))
+        free_gb = _fs_free_gb(state["instances"][0]["ip"]) if state["instances"] else -1
+        free_part = f", shared FS free: {free_gb} GB" if free_gb >= 0 else ""
         print(f"  {alive}/{len(state['instances'])} boxes still running, "
-              f"{total} bags collected")
+              f"{total} bags collected{free_part}")
         if alive == 0:
             print("all boxes done")
             return
@@ -402,7 +431,15 @@ def cmd_poll(args: argparse.Namespace) -> None:
 
 
 def cmd_collect(args: argparse.Namespace) -> None:
-    """rsync aic_results_* from every box to ./fleet_results/box_<i>/."""
+    """rsync each box's scoped subtree to ./fleet_results/box_<i>/.
+
+    Sources box `idx` only from `/home/ubuntu/aic-data/box_<idx>/`. Even though
+    /home/ubuntu/aic-data is a symlink to the shared FS (so every box can see
+    every other box's outputs), we still pull from each box because: (a) it
+    matches the existing fleet_results/box_<i>/ layout, (b) NFS read bandwidth
+    isn't a bottleneck, and (c) it works the same whether the FS is shared or
+    per-box-local (fallback path when /lambda/nfs/aic-data isn't mounted).
+    """
     state = load_state()
     out = pathlib.Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
@@ -410,13 +447,13 @@ def cmd_collect(args: argparse.Namespace) -> None:
         ip = inst["ip"]
         dest = out / f"box_{idx}"
         dest.mkdir(exist_ok=True)
-        print(f"  rsync {ip} → {dest}")
-        # Trailing slash on src/aic-data/ pulls contents, not the dir.
+        src = f"ubuntu@{ip}:/home/ubuntu/aic-data/box_{idx}/"
+        print(f"  rsync {src} → {dest}")
         ssh_cmd = "ssh " + " ".join(SSH_OPTS)
         subprocess.run(
             ["rsync", "-az", "--info=progress2",
              "-e", ssh_cmd,
-             f"ubuntu@{ip}:/home/ubuntu/aic-data/",
+             src,
              str(dest) + "/"],
             check=True,
         )

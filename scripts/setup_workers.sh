@@ -79,7 +79,13 @@ mkdir -p "$AIC_DATA_DIR"
 # over the image's baked-in /entrypoint.sh so each worker's Zenoh router binds
 # a distinct host port (7447 + i) under distrobox's --network host. Without
 # this, every worker would try to bind 7447 and only the first one wins.
-ENTRYPOINTS_DIR="${AIC_DATA_DIR}/worker_entrypoints"
+#
+# Scoped per-box (box_<index>/) so multiple instances sharing the aic-data
+# filesystem don't overwrite each other's entrypoint scripts mid-run.
+# BOX_PREFIX is set by run_parallel_multi.sh; fall back to $BOX_INDEX (set by
+# lambda_fleet.py:cmd_run) or $(hostname) for direct shell invocations.
+BOX_PREFIX="${BOX_PREFIX:-${BOX_INDEX:-$(hostname)}}"
+ENTRYPOINTS_DIR="${AIC_DATA_DIR}/worker_entrypoints/box_${BOX_PREFIX}"
 mkdir -p "$ENTRYPOINTS_DIR"
 
 # Writes a per-worker entrypoint script to $1 with the Zenoh listen port set

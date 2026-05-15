@@ -144,12 +144,42 @@ sudo -u ubuntu -i bash <<EOSU
 set -e
 cd /home/ubuntu
 
-# {{MOUNT_SHARED_FS}}
-# If you've attached a Lambda persistent filesystem with the repo + pixi env
-# pre-built, mount it here and `exit 0` to skip the rest. Lambda mounts
-# attached filesystems at /lambda/nfs/<fs-name>/ automatically. The
-# downside of an attached FS is concurrent writes — multiple boxes
-# sharing one FS is fine for read-only configs but not for outputs.
+# --- 2a. Wire the shared aic-data FS into /home/ubuntu/aic-data ----------
+# Lambda mounts persistent filesystems at /lambda/nfs/<fs-name>/ automatically
+# when --file-system is passed at launch. All collection scripts in this repo
+# hardcode /home/ubuntu/aic-data, so we symlink the shared mount over there.
+# Symlink (not bind mount) so it survives docker rm of any worker container
+# that has it bind-mounted, and so the same path resolves inside the worker
+# and on the host. Per-box scoping (box_<index>/) at the next directory level
+# keeps multiple instances from colliding on a single shared FS.
+if [ -d /lambda/nfs/aic-data ]; then
+    if [ -d /home/ubuntu/aic-data ] && [ ! -L /home/ubuntu/aic-data ]; then
+        # First-boot local dir is empty; remove only if so. Refuse to silently
+        # discard any work that may have landed there on prior manual setup.
+        rmdir /home/ubuntu/aic-data 2>/dev/null || \
+            { echo "FATAL: /home/ubuntu/aic-data is a non-empty local dir; refusing to overwrite" >&2; exit 1; }
+    fi
+    ln -sfn /lambda/nfs/aic-data /home/ubuntu/aic-data
+    echo "Mounted shared FS: /home/ubuntu/aic-data -> /lambda/nfs/aic-data"
+
+    # Capacity pre-flight: surface free space so a near-full FS doesn't
+    # silently fail \`StartRecording()\` mid-run after burning hours of compute.
+    # Mcap median is ~1.3 GB/trial; 200 GB = ~150 trials of headroom. Soft
+    # warning only — top-up runs on a near-full FS are a valid use case.
+    free_kb="\$(df -P /lambda/nfs/aic-data | awk 'NR==2 {print \$4}')"
+    free_gb=\$((free_kb / 1024 / 1024))
+    echo "Shared FS free space: \${free_gb} GB on /lambda/nfs/aic-data"
+    if [ "\$free_gb" -lt 200 ]; then
+        echo "warning: shared FS has only \${free_gb} GB free — at ~1.3 GB/trial," >&2
+        echo "         this leaves room for roughly \$((free_gb * 100 / 130)) trials." >&2
+        echo "         Run \\\`du -sh /lambda/nfs/aic-data/box_*\\\` to find what's using it." >&2
+    fi
+else
+    echo "warning: /lambda/nfs/aic-data not present; /home/ubuntu/aic-data will be" >&2
+    echo "         per-box local SSD (0.5 TiB, ~390 trials at 1.3 GB/trial)." >&2
+    echo "         If you passed --file-system aic-data, check the Lambda mount" >&2
+    echo "         succeeded (otherwise box outputs won't be shared)." >&2
+fi
 
 # --- 3. Clone the aic repo -----------------------------------------------
 if [ ! -d ws_aic/src/aic ]; then

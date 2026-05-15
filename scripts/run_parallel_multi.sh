@@ -74,9 +74,15 @@ if [ ! -x "$VENV_PY" ]; then
 fi
 
 NUM_WORKERS="${NUM_WORKERS:-1}"
+# Per-box scope key for shared-FS safety. Fleet driver passes BOX_INDEX=0..N-1;
+# direct shell users fall back to $(hostname) so two boxes never collide on the
+# shared aic-data filesystem. Exported so setup_workers.sh (recreating worker
+# containers per chunk) picks the same scope without needing the fleet driver
+# to pass it through that path too.
+export BOX_PREFIX="${BOX_PREFIX:-${BOX_INDEX:-$(hostname)}}"
 INPUT_CONFIG="${INPUT_CONFIG:-$REPO_ROOT/aic_engine/config/train.yaml}"
-SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs}"
-RESULTS_BASE="${RESULTS_BASE:-/home/ubuntu/aic-data}"
+SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs/box_${BOX_PREFIX}}"
+RESULTS_BASE="${RESULTS_BASE:-/home/ubuntu/aic-data/box_${BOX_PREFIX}}"
 MERGED_OUTPUT="${MERGED_OUTPUT:-$RESULTS_BASE/merged_score.yaml}"
 STAGGER_SECS="${STAGGER_SECS:-5}"
 HOST_CPUS="${HOST_CPUS:-30}"
@@ -110,6 +116,7 @@ fi
 mkdir -p "$RESULTS_BASE" "$SPLIT_DIR"
 
 echo "=== Multi-worker AIC eval ==="
+echo "Box prefix:    $BOX_PREFIX"
 echo "Num workers:   $NUM_WORKERS"
 echo "Input config:  $INPUT_CONFIG"
 echo "Split dir:     $SPLIT_DIR"
