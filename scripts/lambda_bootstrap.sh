@@ -56,10 +56,14 @@ echo "Precondition OK: Ubuntu 24.04 Noble detected."
 # Single apt block up front so the heavy `pixi install` later doesn't run
 # for 20 min before discovering distrobox or libnvidia-gl-*-server is
 # missing. Includes:
-#   distrobox        : container runner (NUM_WORKERS=4 setup_workers.sh)
+#   distrobox        : container runner used by scripts/setup_workers.sh
 #   git              : cloning the repo
-#   python3-venv     : `python3 -m venv ~/.venv` needs this; Ubuntu Server
-#                      doesn't ship it with the base python3 package
+#   python3.12 + -venv + -dev :
+#                      `python3.12 -m venv ~/.venv` needs -venv; -dev is for
+#                      any C extensions in scripts/requirements.txt. We pin
+#                      3.12 explicitly so the venv interpreter is stable even
+#                      if Ubuntu's default python3 shifts in a future point
+#                      release.
 #   ffmpeg           : required downstream by scripts/mcap_to_lerobot.py
 #                      for h264 encoding into the LeRobot dataset
 #   jq, curl, rsync, ca-certificates : misc fleet utilities
@@ -184,7 +188,13 @@ if [ -n "${GHCR_TOKEN}" ]; then
 fi
 sudo docker pull ghcr.io/shu4dev/aic-eval:v1
 
-# Match the original Lambda 1×A100 sizing assumed by run_parallel_multi.sh.
+# Pre-warm just one worker container as a smoke test that distrobox +
+# --nvidia bind-mounts are wired up. The actual collection runtime
+# (scripts/run_parallel_multi.sh) re-invokes setup_workers.sh with whatever
+# NUM_WORKERS the orchestrator picks, rm+recreating containers between
+# chunks, so the count here only sets the floor — it does not constrain
+# the fleet. Keep it at 1 so the bootstrap stays fast on every box and
+# the smoke test exercises the same path as the default fleet config.
 NUM_WORKERS=1 bash scripts/setup_workers.sh
 
 EOSU

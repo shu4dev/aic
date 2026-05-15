@@ -24,19 +24,23 @@
 #   container's hardcoded 7447 instead.
 #
 # Expected speed-up on 1× A100 / 30 vCPU / 200 GB:
-#   GPU contention means N=4 workers do NOT run 4× faster than N=1. Headless
+#   GPU contention means parallel workers do NOT scale linearly. Headless
 #   Gazebo + a small ACT policy each take ~3-5 GB VRAM and a slice of the
-#   A100's SMs, so 3-4 in parallel usually yields ~2-2.5× wallclock speed-up
-#   versus serial. Worth measuring on your actual workload.
+#   A100's SMs, so empirically 3-4 in parallel yields ~2-2.5× wallclock vs
+#   N=1, not 3-4×. Default is N=1 (serial) for the highest per-trial success
+#   rate; bump for wall-clock throughput. Worth measuring on your workload.
 #
 # Usage:
-#   bash scripts/run_parallel_multi.sh
-#   NUM_WORKERS=2 bash scripts/run_parallel_multi.sh
+#   bash scripts/run_parallel_multi.sh                            # N=1
+#   NUM_WORKERS=4 bash scripts/run_parallel_multi.sh              # N=4
 #   NUM_WORKERS=4 POLICY=aic_example_policies.ros.WaveArm \
 #       bash scripts/run_parallel_multi.sh
 #
 # Environment overrides (all optional):
-#   NUM_WORKERS      worker count               (default: 4)
+#   NUM_WORKERS      worker count               (default: 1 — fully serial per
+#                                                box; bump for parallel workers,
+#                                                each on its own Zenoh router
+#                                                port 7447+i via bridge net)
 #   INPUT_CONFIG     trial config to split      (default: aic_engine/config/train.yaml)
 #   SPLIT_DIR        where part files are written
 #                                               (default: /home/ubuntu/aic-data/aic_split_configs)
@@ -44,13 +48,8 @@
 #                                               (default: /home/ubuntu/aic-data)
 #   MERGED_OUTPUT    final merged scores YAML   (default: $RESULTS_BASE/merged_score.yaml)
 #   STAGGER_SECS     seconds to wait between worker launches so CPU/disk init
-#                    storms don't overlap. Default: 5.
-#                    NOTE: real concurrent multi-worker execution on one host
-#                    still needs Phase 2 work — distrobox containers default to
-#                    --network host, so two of them both binding Zenoh on 7447
-#                    will collide. Until each worker container is set up with
-#                    its own Zenoh router port (separate plan), NUM_WORKERS>1
-#                    will not actually run in parallel.
+#                    storms don't overlap. Default: 5. Only fires when
+#                    NUM_WORKERS>1; harmless at NUM_WORKERS=1.
 #   HOST_CPUS        cores available to split   (default: 30)
 #   HOST_MEM_GB      GB of RAM available to split (default: 192)
 #   WORKER_CPUS      per-worker --cpus override (default: ⌊HOST_CPUS/N⌋)
@@ -74,7 +73,7 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 
-NUM_WORKERS="${NUM_WORKERS:-4}"
+NUM_WORKERS="${NUM_WORKERS:-1}"
 INPUT_CONFIG="${INPUT_CONFIG:-$REPO_ROOT/aic_engine/config/train.yaml}"
 SPLIT_DIR="${SPLIT_DIR:-/home/ubuntu/aic-data/aic_split_configs}"
 RESULTS_BASE="${RESULTS_BASE:-/home/ubuntu/aic-data}"
