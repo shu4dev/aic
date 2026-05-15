@@ -169,13 +169,20 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
     # --additional-flags carries arbitrary `docker create` flags:
     #   * -v ${AIC_DATA_DIR}:${AIC_DATA_DIR}            — mounted FS, identity-pathed
     #   * -v ${entrypoint_path}:/entrypoint.sh:ro       — per-worker Zenoh port
+    #   * -v /usr/share/glvnd/egl_vendor.d/10_nvidia.json:...:ro
+    #     distrobox --nvidia bind-mounts the libEGL_nvidia.so / libGLX_nvidia.so
+    #     into /usr/lib/x86_64-linux-gnu, but it does NOT mount the ICD config
+    #     into /usr/share/glvnd/egl_vendor.d/. Without that JSON at the standard
+    #     path, libglvnd only sees 50_mesa.json and falls back to llvmpipe even
+    #     though the NVIDIA libs are present. Mount it ourselves so the default
+    #     EGL lookup works without needing __EGL_VENDOR_LIBRARY_FILENAMES.
     distrobox create \
         --root \
         --nvidia \
         --no-entry \
         --name "$name" \
         --image "$IMAGE" \
-        --additional-flags "-v ${AIC_DATA_DIR}:${AIC_DATA_DIR} -v ${entrypoint_path}:/entrypoint.sh:ro"
+        --additional-flags "-v ${AIC_DATA_DIR}:${AIC_DATA_DIR} -v ${entrypoint_path}:/entrypoint.sh:ro -v /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro"
 
     # distrobox lazily starts containers on first `enter`. Pre-start now so the
     # first run of run_parallel.sh doesn't pay that cost.
