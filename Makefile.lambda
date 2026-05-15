@@ -1,0 +1,96 @@
+# Lambda Cloud fleet automation for AIC trial collection.
+#
+# Required env (export before running):
+#   LAMBDA_API_KEY   bearer token from cloud.lambdalabs.com/api-keys
+#   GHCR_TOKEN       PAT with read:packages, to pull aic-eval image
+#   SSH_KEY          name of an SSH key already registered with Lambda
+#
+# Typical workflow:
+#   make -f Makefile.lambda types          # see what instance types are available
+#   make -f Makefile.lambda launch         # spin up BOXES boxes
+#   make -f Makefile.lambda wait           # ~25 min while bootstrap runs
+#   make -f Makefile.lambda run            # distribute + start collection
+#   make -f Makefile.lambda poll           # blocks until done (hours)
+#   make -f Makefile.lambda collect        # rsync results back
+#   make -f Makefile.lambda terminate      # ALWAYS the last step — bill stops here
+#
+# Or do everything in one go:
+#   make -f Makefile.lambda all CONFIG=aic_engine/config/train.yaml
+# (auto-terminates on completion, even on error)
+#
+# Knobs (override on the make command line):
+#   BOXES=8                 number of Lambda instances
+#   WORKERS_PER_BOX=4       per-box NUM_WORKERS in run_parallel_multi.sh
+#   POLICY=...              policy module to load
+#   CONFIG=path/to.yaml     trial config to split + distribute
+#   INSTANCE_TYPE=gpu_1x_a100   Lambda type name
+#   REGION=us-east-1
+#   RESULTS_DIR=./fleet_results
+
+PYTHON         ?= pixi run python
+FLEET          := $(PYTHON) scripts/lambda_fleet.py
+
+BOXES          ?= 4
+WORKERS_PER_BOX?= 4
+POLICY         ?= aic_example_policies.ros.SCCheatCode
+CONFIG         ?= aic_engine/config/train.yaml
+INSTANCE_TYPE  ?= gpu_1x_a100
+REGION         ?= us-east-1
+SSH_KEY        ?= $(USER)
+RESULTS_DIR    ?= ./fleet_results
+
+.PHONY: help types launch wait run status poll collect terminate all check-env
+
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) | \
+	    awk 'BEGIN{FS=":.*?##"} {printf "  %-12s %s\n", $$1, $$2}'
+
+check-env: ## verify LAMBDA_API_KEY is set
+	@if [ -z "$$LAMBDA_API_KEY" ]; then \
+	    echo "error: LAMBDA_API_KEY not set"; exit 1; fi
+
+types: check-env ## list instance types with capacity right now
+	$(FLEET) types
+
+launch: check-env ## spin up BOXES=$(BOXES) instances
+	$(FLEET) launch \
+	    --num $(BOXES) \
+	    --region $(REGION) \
+	    --instance-type $(INSTANCE_TYPE) \
+	    --ssh-key $(SSH_KEY) \
+	    --bootstrap scripts/lambda_bootstrap.sh
+
+wait: check-env ## block until every box finishes bootstrap (~25 min cold)
+	$(FLEET) wait
+
+run: check-env ## distribute CONFIG and start run_parallel_multi.sh on each box
+	$(FLEET) run \
+	    --config $(CONFIG) \
+	    --workers-per-box $(WORKERS_PER_BOX) \
+	    --policy $(POLICY)
+
+status: check-env ## one-shot snapshot of bag counts + alive/dead per box
+	$(FLEET) status
+
+poll: check-env ## block until every box finishes (hours)
+	$(FLEET) poll
+
+collect: check-env ## rsync results from every box to $(RESULTS_DIR)/box_*/
+	$(FLEET) collect --output $(RESULTS_DIR)
+
+terminate: ## terminate every tracked instance (idempotent — always safe)
+	$(FLEET) terminate
+
+# End-to-end target. The `|| true` + explicit terminate ensures we don't
+# leak instances even if `poll` errors. Don't skip the collect step
+# before terminate — once instances are gone, the data goes with them.
+all: launch wait run ## launch + wait + run + poll + collect + terminate
+	@echo ""
+	@echo "=== Fleet running. Polling until completion... ==="
+	$(FLEET) poll || true
+	@echo ""
+	@echo "=== Collecting results before terminate ==="
+	$(MAKE) -f Makefile.lambda collect || true
+	@echo ""
+	@echo "=== Terminating (this stops the meter) ==="
+	$(MAKE) -f Makefile.lambda terminate

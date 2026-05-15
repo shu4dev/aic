@@ -71,6 +71,13 @@ MERGED_OUTPUT="${MERGED_OUTPUT:-$RESULTS_BASE/merged_score.yaml}"
 STAGGER_SECS="${STAGGER_SECS:-5}"
 HOST_CPUS="${HOST_CPUS:-30}"
 HOST_MEM_GB="${HOST_MEM_GB:-192}"
+# Per-worker sim-state-fresh chunking. Every CHUNK_TRIALS trials, the
+# worker's container is `docker rm -f`'d + recreated so gz/Ogre/Zenoh
+# state never accumulates past the ~70-trial mark where we've observed
+# heap corruption on first-trial of a new chunk under plain `docker
+# restart`. Set 0 to disable chunking (single long run per worker).
+CHUNK_TRIALS="${CHUNK_TRIALS:-10}"
+MAX_CHUNK_RETRIES="${MAX_CHUNK_RETRIES:-3}"
 
 if ! [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || [ "$NUM_WORKERS" -lt 1 ]; then
     echo "error: NUM_WORKERS must be a positive integer (got '$NUM_WORKERS')" >&2
@@ -153,10 +160,73 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
     fi
 
     echo "[orchestrator] Launching worker $i (part $part_file, log $runner_log)"
+    # Per-worker chunked execution:
+    #   1. Sub-split the worker's part_file into CHUNK_TRIALS-sized pieces.
+    #   2. For each chunk: docker rm -f + recreate the worker container
+    #      (truly fresh gz state — `docker restart` alone is insufficient,
+    #      we observed heap corruption on first trial of new chunks after
+    #      ~70 cumulative trials in the same container), then run.
+    #   3. Per-chunk results land in
+    #        $RESULTS_BASE/aic_results_${i}/chunk_${c}/
+    #      (each has bag_trial_*/, engine.log, policy.log, scoring.yaml).
+    #
+    # Why rm + setup_workers.sh instead of inline `distrobox create`:
+    # setup_workers.sh skips existing containers, so calling it after
+    # rm'ing just this worker recreates only this worker (idempotent for
+    # the others). Keeps the create logic + entrypoint regen + ldconfig
+    # post-step in one place.
     (
-        PART_FILE="$part_file" \
-        RESULTS="$RESULTS_BASE" \
-        bash "$SCRIPT_DIR/run_parallel.sh"
+        worker_results="$RESULTS_BASE/aic_results_${i}"
+        worker_chunks_dir="${worker_results}/chunks_src"
+        mkdir -p "$worker_chunks_dir"
+
+        if [ "$CHUNK_TRIALS" -gt 0 ]; then
+            # Count trials in this part file, then split into CHUNK_TRIALS-sized chunks.
+            num_trials_in_part="$(grep -c '^  trial_' "$part_file")"
+            num_chunks=$(( (num_trials_in_part + CHUNK_TRIALS - 1) / CHUNK_TRIALS ))
+            echo "[worker $i] splitting $num_trials_in_part trials into $num_chunks chunks of $CHUNK_TRIALS"
+            pixi run python "$SCRIPT_DIR/split_trials.py" \
+                --input "$part_file" \
+                --output-dir "$worker_chunks_dir" \
+                --num-parts "$num_chunks"
+        else
+            num_chunks=1
+            cp "$part_file" "$worker_chunks_dir/train_part_0.yaml"
+        fi
+
+        for c in $(seq 0 $((num_chunks - 1))); do
+            chunk_file="$worker_chunks_dir/train_part_${c}.yaml"
+            chunk_results="$worker_results/chunk_${c}"
+            mkdir -p "$chunk_results"
+
+            for attempt in $(seq 1 "$MAX_CHUNK_RETRIES"); do
+                echo "[worker $i chunk $c attempt $attempt] recreating aic_worker_${i}"
+                # flock prevents concurrent workers' setup_workers.sh calls
+                # from racing on `distrobox create`: a worker that just rm'd
+                # its own container could otherwise have its setup loop try
+                # to (re)create a peer's container that the peer is also
+                # recreating, hitting "container already exists" or worse.
+                (
+                    flock -x 200
+                    sudo docker rm -f "aic_worker_${i}" >/dev/null 2>&1 || true
+                    NUM_WORKERS="$NUM_WORKERS" \
+                        bash "$SCRIPT_DIR/setup_workers.sh" >/dev/null
+                ) 200>/tmp/aic_setup_workers.lock
+
+                NAME="aic_worker_${i}" \
+                RESULTS="$chunk_results" \
+                RESULTS_NO_SUFFIX=1 \
+                PART_FILE="$chunk_file" \
+                ROUTER_PORT="$((7447 + i))" \
+                MULTI_WORKER=1 \
+                bash "$SCRIPT_DIR/run_parallel.sh" && { echo "[worker $i chunk $c] ok"; break; }
+
+                echo "[worker $i chunk $c attempt $attempt] failed, will retry"
+                sleep 5
+            done
+        done
+
+        echo "[worker $i] all $num_chunks chunks done"
     ) > "$runner_log" 2>&1 &
     PIDS+=("$!")
     NAMES+=("aic_worker_${i}")
@@ -193,9 +263,12 @@ if [ "$failed" -gt 0 ]; then
 fi
 
 echo "[orchestrator] Merging per-worker scores → $MERGED_OUTPUT"
+# Chunked layout: aic_results_<i>/chunk_<c>/scoring.yaml (one file per chunk
+# per worker). The non-chunked legacy path is also accepted as a fallback.
 pixi run python "$SCRIPT_DIR/merge_scores.py" \
     --results-root "$RESULTS_BASE" \
-    --output "$MERGED_OUTPUT"
+    --pattern 'aic_results_*/chunk_*/scoring.yaml' \
+    --output "$MERGED_OUTPUT" || true
 
 echo ""
 echo "=== Multi-worker run finished ==="

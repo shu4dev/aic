@@ -164,7 +164,13 @@ fi
 # (aic_results_*/score.yaml) picks each one up.
 _NAME_BASE="${NAME:-aic_worker}"
 _RESULTS_BASE="${RESULTS:-/home/ubuntu/aic-data}"
-if [ -n "$PART_INDEX" ]; then
+# RESULTS_NO_SUFFIX=1 disables the auto-append of aic_results_<i> so callers
+# (e.g. the chunked orchestrator) can place each chunk in its own pre-built
+# subdir without an extra suffix level. NAME must also be explicit then.
+if [ -n "${RESULTS_NO_SUFFIX:-}" ]; then
+    NAME="${NAME:?RESULTS_NO_SUFFIX requires NAME to be set}"
+    RESULTS="$_RESULTS_BASE"
+elif [ -n "$PART_INDEX" ]; then
     NAME="${_NAME_BASE}_${PART_INDEX}"
     RESULTS="${_RESULTS_BASE}/aic_results_${PART_INDEX}"
 else
@@ -215,10 +221,19 @@ fi
 # trial with "More than one node with name 'aic_model' found". Same story for a
 # leftover image_relay. Belt-and-suspenders: pkill them by command pattern so
 # we start from a clean fabric.
-pkill -f 'aic_model'                  2>/dev/null || true
-pkill -f "$RELAY_NODE"                2>/dev/null || true
-# Give the OS a moment to actually reap them.
-sleep 1
+#
+# SKIP this in multi-worker mode: run_parallel_multi.sh runs N copies of this
+# script concurrently, all sharing the host. A blanket `pkill -f aic_model`
+# fired by worker_i kills the host-side aic_model of workers 0..i-1, leaving
+# only the last-launched worker actually doing trials — a stealthy multi-
+# worker regression. The orchestrator's own cleanup trap is responsible for
+# cross-worker teardown; per-worker zombie cleanup is only valid for solo runs.
+if [ -z "${MULTI_WORKER:-}" ]; then
+    pkill -f 'aic_model'                  2>/dev/null || true
+    pkill -f "$RELAY_NODE"                2>/dev/null || true
+    # Give the OS a moment to actually reap them.
+    sleep 1
+fi
 
 # The chosen ROUTER_PORT must be free on the host. For worker 0 (port 7447 with
 # --network host) the container binds directly; for workers ≥1 the bridge port
@@ -411,8 +426,53 @@ echo "[$NAME] policy launched: $POLICY (PID $POLICY_PID, log $POLICY_LOG)"
 echo ""
 echo "Waiting for $NAME launch to finish..."
 echo "  (Tail aic_engine's view live: tail -f $ENGINE_LOG)"
-wait "$LAUNCH_PID" || true
-echo "[$NAME] launch done"
+
+# Ogre/EGL plugin-load failure is a *silent* killer: gz_server dies, but
+# ros2 launch and the controller_manager spawner keep retrying forever, so
+# the docker exec never returns and the orchestrator's per-chunk retry
+# can't fire. Poll engine.log in the background; if we see the Ogre
+# plugin-load failure signature, kill the launch fast so the retry loop
+# can recreate the container.
+#
+# Communicate via a flag file rather than the exit code: when the watchdog
+# kills `docker exec`, it propagates SIGTERM to /entrypoint.sh, which has
+# `trap "kill -SIGINT ..." EXIT` and exits cleanly (return 0). The wait
+# then returns 0 and the orchestrator's `&& break` mistakes it for success.
+# A flag file lets us reliably signal "this attempt was a watchdog kill"
+# regardless of how the killed process happens to exit.
+WATCH_FIRED="${ENGINE_LOG}.watchdog_fired"
+rm -f "$WATCH_FIRED"
+(
+    OGRE_RE='Unable to load Ogre Plugin|unable to find OpenGL 3\+ Rendering Subsystem'
+    HEAP_RE='corrupted size vs\. prev_size'
+    while kill -0 "$LAUNCH_PID" 2>/dev/null; do
+        if [ -f "$ENGINE_LOG" ] && grep -qE "$OGRE_RE|$HEAP_RE" "$ENGINE_LOG"; then
+            echo "[$NAME] WATCHDOG: detected gz init failure — killing launch so retry can fire" >&2
+            touch "$WATCH_FIRED"
+            kill "$LAUNCH_PID" 2>/dev/null || true
+            ${DOCKER} exec "$NAME" pkill -TERM -f /entrypoint.sh >/dev/null 2>&1 || true
+            ${DOCKER} exec "$NAME" pkill -TERM -f ros2 >/dev/null 2>&1 || true
+            exit 0
+        fi
+        sleep 5
+    done
+) &
+OGRE_WATCH_PID=$!
+
+# Capture the launch exit code without letting `set -e` abort. Propagating it
+# at the end lets run_parallel_multi.sh's per-worker retry loop detect crashes
+# (gz_server SIGSEGV / heap corruption → /entrypoint.sh non-zero) and restart.
+LAUNCH_EXIT=0
+wait "$LAUNCH_PID" || LAUNCH_EXIT=$?
+kill "$OGRE_WATCH_PID" 2>/dev/null || true
+echo "[$NAME] launch done (exit $LAUNCH_EXIT)"
+
+# If the watchdog fired, force non-zero exit so retry triggers regardless
+# of how docker exec happened to return.
+if [ -f "$WATCH_FIRED" ]; then
+    rm -f "$WATCH_FIRED"
+    LAUNCH_EXIT=42  # sentinel: watchdog killed for gz init failure
+fi
 
 # --- Summary --------------------------------------------------------------
 
@@ -423,3 +483,5 @@ if [ -f "$RESULTS/score.yaml" ]; then
 else
     echo "(no score.yaml in $RESULTS — check $POLICY_LOG, $RELAY_LOG, $ENGINE_LOG)"
 fi
+
+exit "$LAUNCH_EXIT"

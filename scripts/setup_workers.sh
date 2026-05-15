@@ -45,6 +45,14 @@ NUM_WORKERS="${NUM_WORKERS:-1}"
 IMAGE="${IMAGE:-ghcr.io/shu4dev/aic-eval:v1}"
 AIC_DATA_DIR="${AIC_DATA_DIR:-/home/ubuntu/aic-data}"
 NAME_PREFIX="${NAME_PREFIX:-aic_worker}"
+# Per-worker CPU/RAM caps. Lambda 1x A100 box is 30 vCPU / 192 GB; without
+# caps, N concurrent gz_servers fight unbounded for CPU and starve the
+# in-container aic_adapter, which manifests as /tf going stale on the host
+# policy and the policy's _align_and_descend loop spinning forever.
+HOST_CPUS="${HOST_CPUS:-30}"
+HOST_MEM_GB="${HOST_MEM_GB:-192}"
+WORKER_CPUS="${WORKER_CPUS:-$((HOST_CPUS / NUM_WORKERS))}"
+WORKER_MEM_GB="${WORKER_MEM_GB:-$((HOST_MEM_GB / NUM_WORKERS))}"
 
 if ! command -v distrobox >/dev/null 2>&1; then
     echo "error: distrobox not found on PATH — run 'sudo apt install -y distrobox' first" >&2
@@ -115,6 +123,7 @@ ZENOH_CONFIG_OVERRIDE+=';listen/endpoints=["tcp/[::]:${port}"]'
 ZENOH_CONFIG_OVERRIDE+=';connect/endpoints=[]'
 ZENOH_CONFIG_OVERRIDE+=';routing/router/peers_failover_brokering=true'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"\$AIC_EVAL_PASSWD"'"'
@@ -138,6 +147,7 @@ trap "kill -SIGINT -\$ZENOH_EVAL_ROUTER_PID -\$ZENOH_ROUTER_PID" EXIT
 # declarations, e.g. LoadComposableNodes loading gz_server into ros_gz_container.
 ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/localhost:${port}"]'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"\$AIC_EVAL_PASSWD"'"'
@@ -192,11 +202,19 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
         --no-entry \
         --name "$name" \
         --image "$IMAGE" \
-        --additional-flags "-v ${AIC_DATA_DIR}:${AIC_DATA_DIR} -v ${entrypoint_path}:/entrypoint.sh:ro -v /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro"
+        --additional-flags "--cpus=${WORKER_CPUS} --memory=${WORKER_MEM_GB}g -v ${AIC_DATA_DIR}:${AIC_DATA_DIR} -v ${entrypoint_path}:/entrypoint.sh:ro -v /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro"
 
     # distrobox lazily starts containers on first `enter`. Pre-start now so the
     # first run of run_parallel.sh doesn't pay that cost.
     sudo docker start "$name" >/dev/null
+
+    # Image ships RenderSystem_GL3Plus.so but no ld.so.conf.d entry for the
+    # /usr/lib/x86_64-linux-gnu/OGRE-2.3 dir its libOgreNextMain.so.2.3.1 lives
+    # in, so dlopen of the plugin fails ("unable to find OpenGL 3+ Rendering
+    # Subsystem"). Add the conf + ldconfig once per fresh container.
+    sudo docker exec -u root "$name" bash -c \
+        'echo /usr/lib/x86_64-linux-gnu/OGRE-2.3 > /etc/ld.so.conf.d/ogre-next.conf && ldconfig' \
+        >/dev/null
 done
 
 echo ""

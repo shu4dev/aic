@@ -1257,13 +1257,38 @@ class SCCheatCode(Policy):
         probe_iter         = 0               # 0 = idle; 1..PROBE_MAX_ITERS while active
         probe_center_xy    = None            # snapshot of descent_xy_offset at probe start
 
+        # Wall-clock guards. Task time_limit is 180s; approach already burned
+        # ~15-20s. The TF-fail guard bails when /tf delivery stalls for
+        # >1s straight (multi-worker Zenoh hiccup, observed empirically),
+        # which previously spun this loop forever.
+        ALIGN_DESCEND_MAX_S = 140.0
+        TF_FAIL_MAX_S       = 1.0
+        loop_start_s        = self._now_s()
+        tf_fail_start_s     = None
+
         while True:
+            if self._now_s() - loop_start_s > ALIGN_DESCEND_MAX_S:
+                self.get_logger().error(
+                    f"_align_and_descend timed out after {ALIGN_DESCEND_MAX_S:.0f}s — aborting trial"
+                )
+                send_feedback("align_descend timeout")
+                break
             port = self._port_tf()
             plug = self._plug_tf()
             grip = self._grip_tf()
             if not all([port, plug, grip]):
+                now_s = self._now_s()
+                if tf_fail_start_s is None:
+                    tf_fail_start_s = now_s
+                elif now_s - tf_fail_start_s > TF_FAIL_MAX_S:
+                    self.get_logger().error(
+                        f"TF unavailable for {now_s - tf_fail_start_s:.1f}s — aborting trial"
+                    )
+                    send_feedback("tf_stall")
+                    break
                 self.sleep_for(0.03)
                 continue
+            tf_fail_start_s = None
 
             base_step = params["coarse_step"] if z_offset > params["fine_threshold"] else params["fine_step"]
 

@@ -29,6 +29,12 @@ RUN --mount=type=cache,target=/ws_aic/build,sharing=locked \
   && GZ_BUILD_FROM_SOURCE=1 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --merge-install --executor sequential \
   && rm -rf /ws_aic/log /ws_aic/src
 
+# libogre-next-2.3.0 ships libOgreNextMain.so.2.3.1 at
+# /usr/lib/x86_64-linux-gnu/OGRE-2.3 but doesn't drop an ld.so.conf.d entry.
+# Without this, RenderSystem_GL3Plus.so fails to dlopen its main dep and Ogre
+# aborts with "unable to find OpenGL 3+ Rendering Subsystem".
+RUN echo /usr/lib/x86_64-linux-gnu/OGRE-2.3 > /etc/ld.so.conf.d/ogre-next.conf && ldconfig
+
 COPY --chmod=644 docker/aic_eval/aic_zenoh_config.json5 /aic_zenoh_config.json5
 COPY --chmod=755 <<"EOF" /entrypoint.sh
 #!/bin/bash
@@ -61,6 +67,9 @@ ZENOH_CONFIG_OVERRIDE+=';listen/endpoints=["tcp/[::]:7447"]'
 ZENOH_CONFIG_OVERRIDE+=';connect/endpoints=[]'
 ZENOH_CONFIG_OVERRIDE+=';routing/router/peers_failover_brokering=true'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
+# Disable multicast scouting so N>1 concurrent workers on one host don't
+# auto-peer their routers and pollute each other's aic_model namespace.
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"$AIC_EVAL_PASSWD"'"'
@@ -75,6 +84,7 @@ trap "kill -SIGINT -$ZENOH_EVAL_ROUTER_PID -$ZENOH_ROUTER_PID" EXIT
 
 # start the evaluator
 ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
+ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/password="'"$AIC_EVAL_PASSWD"'"'
