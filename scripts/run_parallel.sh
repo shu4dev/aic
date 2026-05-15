@@ -350,14 +350,13 @@ if [ "$zenoh_up" = "0" ]; then
 fi
 
 # Host-side ZENOH_CONFIG_OVERRIDE pointing the session at this worker's router.
-# Always pin connect/endpoints to the per-worker port and disable BOTH gossip
-# and multicast scouting. The base aic_zenoh_config.json5 has multicast off and
-# connect=tcp/localhost:7447 hardcoded, but gossip is enabled and worker N≥1's
-# router lives on a different port — so without these overrides the host policy
-# (worker 0 included, since gossip can pull it into another worker's fabric)
-# would not stay pinned to its own router.
+# Pin connect/endpoints to the per-worker port and disable multicast scouting
+# so the host policy/relay can't multicast-discover another worker's router
+# (the host Zenoh library defaults to multicast ON, unlike the JSON5 inside
+# the container). Gossip stays enabled so the host policy's queryables
+# (aic_model lifecycle services) are advertised through the router to the
+# in-container aic_engine.
 HOST_ZENOH_OVERRIDE='connect/endpoints=["tcp/localhost:'"${ROUTER_PORT}"'"]'
-HOST_ZENOH_OVERRIDE+=';scouting/gossip/enabled=false'
 HOST_ZENOH_OVERRIDE+=';scouting/multicast/enabled=false'
 HOST_ZENOH_OVERRIDE+=';transport/shared_memory/enabled=false'
 

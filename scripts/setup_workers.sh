@@ -113,8 +113,6 @@ export ZENOH_ROUTER_CONFIG_URI=/aic_zenoh_config.json5
 ZENOH_CONFIG_OVERRIDE='mode="router"'
 ZENOH_CONFIG_OVERRIDE+=';listen/endpoints=["tcp/[::]:${port}"]'
 ZENOH_CONFIG_OVERRIDE+=';connect/endpoints=[]'
-ZENOH_CONFIG_OVERRIDE+=';scouting/gossip/enabled=false'
-ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 ZENOH_CONFIG_OVERRIDE+=';routing/router/peers_failover_brokering=true'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
@@ -130,15 +128,15 @@ ZENOH_ROUTER_PID=\$!
 trap "kill -SIGINT -\$ZENOH_EVAL_ROUTER_PID -\$ZENOH_ROUTER_PID" EXIT
 
 # Peer override: the base aic_zenoh_config.json5 hardcodes
-# connect/endpoints=["tcp/localhost:7447"] and leaves gossip scouting on, so
-# without an override every in-container peer (aic_engine, aic_adapter,
-# gz_server, ros_gz_bridge) would connect to worker 0's router and gossip-merge
-# all N workers into one Zenoh mesh under --network host — splitting each
-# worker's aic_engine from its own host-side aic_model. Pin the connect
-# endpoint to this worker's router port and silence both scouting modes.
+# connect/endpoints=["tcp/localhost:7447"]. Without overriding it, every
+# in-container peer in workers ≥1 would connect to worker 0's router and split
+# the worker's aic_engine from its own host-side aic_model. Repointing
+# connect/endpoints at this worker's router is sufficient: the router has
+# connect/endpoints=[] and listens on a unique port, so cross-router bridges
+# can't form. We deliberately do NOT disable gossip/multicast here — ROS 2
+# service discovery under rmw_zenoh_cpp relies on intra-fabric gossip
+# declarations, e.g. LoadComposableNodes loading gz_server into ros_gz_container.
 ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/localhost:${port}"]'
-ZENOH_CONFIG_OVERRIDE+=';scouting/gossip/enabled=false'
-ZENOH_CONFIG_OVERRIDE+=';scouting/multicast/enabled=false'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
   ZENOH_CONFIG_OVERRIDE+=';transport/auth/usrpwd/user="eval"'
